@@ -10,12 +10,19 @@ export async function GET() {
       transport: http(RPC_URL, { timeout: 12_000 }),
     });
     const blockNumber = await client.getBlockNumber();
-    return Response.json({
-      ok: true,
-      chainId: RITUAL_CHAIN_ID,
-      blockNumber: Number(blockNumber),
-      at: new Date().toISOString(),
-    });
+    return Response.json(
+      {
+        ok: true,
+        chainId: RITUAL_CHAIN_ID,
+        blockNumber: Number(blockNumber),
+        at: new Date().toISOString(),
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store, max-age=0",
+        },
+      }
+    );
   } catch (e) {
     return Response.json(
       {
