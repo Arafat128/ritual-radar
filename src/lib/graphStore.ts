@@ -25,19 +25,33 @@ type GraphStore = {
   graph: GraphData | null;
   selectedId: string | null;
   filters: Filters;
-  timelineT: number; // 0..1 scrubber
+  timelineT: number;
   blockHeight: number | null;
+  lastRefreshAt: number | null;
+  autoRefresh: boolean;
+  rootLive: {
+    balanceRit?: string;
+    type?: string;
+    txCount?: number;
+  } | null;
+  meta: {
+    liveEdges?: number;
+    blocksScanned?: number;
+    persistentCount?: number;
+    sovereignCount?: number;
+  } | null;
   setQuery: (q: string) => void;
   setSelected: (id: string | null) => void;
   setTimelineT: (t: number) => void;
   setBlockHeight: (n: number | null) => void;
+  setAutoRefresh: (v: boolean) => void;
   toggleNodeType: (t: NodeType) => void;
   toggleEdgeType: (t: EdgeType) => void;
   setShowPrecompiles: (v: boolean) => void;
   setDepth: (d: number) => void;
   setMinValueEth: (n: number) => void;
   loadMock: (address?: string) => void;
-  loadLive: (address: string) => Promise<void>;
+  loadLive: (address: string, opts?: { silent?: boolean }) => Promise<void>;
   applyLayoutPositions: (
     positions: Record<string, { x: number; y: number; z: number }>
   ) => void;
@@ -59,8 +73,10 @@ const defaultFilters = (): Filters => ({
   ]),
   showPrecompiles: false,
   minValueEth: 0,
-  depth: 1,
+  depth: 2,
 });
+
+let liveAbort: AbortController | null = null;
 
 export const useGraphStore = create<GraphStore>((set, get) => ({
   query: "",
@@ -71,11 +87,16 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   filters: defaultFilters(),
   timelineT: 1,
   blockHeight: null,
+  lastRefreshAt: null,
+  autoRefresh: true,
+  rootLive: null,
+  meta: null,
 
   setQuery: (q) => set({ query: q }),
   setSelected: (id) => set({ selectedId: id }),
   setTimelineT: (t) => set({ timelineT: Math.min(1, Math.max(0, t)) }),
   setBlockHeight: (n) => set({ blockHeight: n }),
+  setAutoRefresh: (v) => set({ autoRefresh: v }),
 
   toggleNodeType: (t) => {
     const next = new Set(get().filters.nodeTypes);
@@ -97,6 +118,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     set({ filters: { ...get().filters, minValueEth: Math.max(0, n) } }),
 
   loadMock: (address) => {
+    liveAbort?.abort();
     const root = (address || get().query || "").trim() || undefined;
     const graph = buildMockGraph(root || "");
     set({
@@ -106,42 +128,82 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       selectedId: graph.root,
       query: graph.root,
       timelineT: 1,
-      blockHeight: graph.blockHeight ?? null,
+      blockHeight: null,
+      lastRefreshAt: Date.now(),
+      rootLive: null,
+      meta: null,
     });
   },
 
-  loadLive: async (address) => {
+  loadLive: async (address, opts) => {
     const addr = address.trim().toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(addr)) {
       set({ error: "Enter a valid 0x address (40 hex chars)" });
       return;
     }
-    set({ loading: true, error: null, query: addr });
+    liveAbort?.abort();
+    const ac = new AbortController();
+    liveAbort = ac;
+    if (!opts?.silent) {
+      set({ loading: true, error: null, query: addr });
+    } else {
+      set({ query: addr });
+    }
     try {
-      const res = await fetch(`/api/graph?address=${encodeURIComponent(addr)}`, {
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/graph?address=${encodeURIComponent(addr)}`,
+        { cache: "no-store", signal: ac.signal }
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "fetch failed");
-      // Until full history API is wired, API may return enriched mock
+      const graph = data.graph as GraphData;
       set({
-        graph: data.graph as GraphData,
+        graph,
         loading: false,
-        selectedId: addr,
+        error: null,
+        selectedId: get().selectedId || addr,
         timelineT: 1,
-        blockHeight: data.graph?.blockHeight ?? data.blockHeight ?? null,
+        blockHeight: graph.blockHeight ?? data.blockHeight ?? null,
+        lastRefreshAt: Date.now(),
+        rootLive: data.rootLive
+          ? {
+              balanceRit: data.rootLive.balanceRit,
+              type: data.rootLive.type,
+              txCount: data.rootLive.txCount,
+            }
+          : null,
+        meta: data.meta
+          ? {
+              liveEdges: data.meta.liveEdges,
+              blocksScanned: data.meta.blocksScanned,
+              persistentCount: data.meta.persistentCount,
+              sovereignCount: data.meta.sovereignCount,
+            }
+          : null,
       });
     } catch (e) {
-      // Graceful: fall back to mock so the product stays usable
+      if (e instanceof Error && e.name === "AbortError") return;
+      // Do not silently replace a good live graph with mock on refresh failure
+      if (opts?.silent && get().graph?.source !== "mock") {
+        set({
+          error:
+            (e instanceof Error ? e.message : "Refresh failed") +
+            " — keeping previous graph",
+        });
+        return;
+      }
       const graph = buildMockGraph(addr);
       set({
         graph,
         loading: false,
         error:
           (e instanceof Error ? e.message : "Live graph unavailable") +
-          " — showing mock neighborhood",
+          " — showing demo neighborhood",
         selectedId: addr,
-        blockHeight: graph.blockHeight ?? null,
+        blockHeight: null,
+        lastRefreshAt: Date.now(),
+        rootLive: null,
+        meta: null,
       });
     }
   },
@@ -156,6 +218,35 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     set({ graph: { ...g, nodes } });
   },
 }));
+
+/** BFS hop distance from root */
+function hopDistance(
+  root: string,
+  edges: GraphEdge[],
+  maxDepth: number
+): Set<string> {
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    if (!adj.has(e.source)) adj.set(e.source, []);
+    if (!adj.has(e.target)) adj.set(e.target, []);
+    adj.get(e.source)!.push(e.target);
+    adj.get(e.target)!.push(e.source);
+  }
+  const keep = new Set<string>([root]);
+  let frontier = [root];
+  for (let d = 0; d < maxDepth; d++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const peer of adj.get(id) || []) {
+        if (keep.has(peer)) continue;
+        keep.add(peer);
+        next.push(peer);
+      }
+    }
+    frontier = next;
+  }
+  return keep;
+}
 
 export function filterGraph(
   graph: GraphData,
@@ -180,16 +271,23 @@ export function filterGraph(
     return true;
   });
 
+  // Depth limit (hops from root)
+  const withinDepth = hopDistance(graph.root, edges, filters.depth);
+  edges = edges.filter(
+    (e) => withinDepth.has(e.source) && withinDepth.has(e.target)
+  );
+
   const nodeIds = new Set<string>([graph.root]);
   for (const e of edges) {
     nodeIds.add(e.source);
     nodeIds.add(e.target);
   }
+  // Include isolated root-only nodes within depth if no edges
+  withinDepth.forEach((id) => nodeIds.add(id));
 
   const nodes = graph.nodes.filter((n) => {
     if (!nodeIds.has(n.id) && n.id !== graph.root) return false;
     if (n.type === "precompile" && !filters.showPrecompiles) {
-      // keep if root is precompile
       return n.id === graph.root;
     }
     if (n.type !== "precompile" && !filters.nodeTypes.has(n.type)) {
@@ -201,7 +299,7 @@ export function filterGraph(
   const visible = new Set(nodes.map((n) => n.id));
   edges = edges.filter((e) => visible.has(e.source) && visible.has(e.target));
 
-  // Heartbeat spam: collapse many heartbeats to same pair — keep latest only for render
+  // Heartbeat spam: one arc per pair
   const hbKey = new Map<string, GraphEdge>();
   const rest: GraphEdge[] = [];
   for (const e of edges) {
@@ -214,8 +312,6 @@ export function filterGraph(
     }
   }
   edges = [...rest, ...Array.from(hbKey.values())];
-
-  // Self-loops (scheduled wake) excluded from edges
   edges = edges.filter((e) => e.source !== e.target);
 
   return { nodes, edges };

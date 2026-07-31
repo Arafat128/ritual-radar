@@ -17,6 +17,8 @@ export type EdgeType =
   | "scheduled"
   | "heartbeat";
 
+export type GraphSource = "mock" | "live" | "live_partial";
+
 export interface GraphNode {
   id: string;
   type: NodeType;
@@ -26,6 +28,8 @@ export interface GraphNode {
   txCount: number;
   firstSeen?: number;
   lastSeen?: number;
+  /** true when fields came from RPC / agent cache (not demo seed) */
+  live?: boolean;
   /** force layout position (mutated by simulation) */
   x?: number;
   y?: number;
@@ -46,6 +50,7 @@ export interface GraphEdge {
   value: string;
   timestamp: number;
   txHash: string;
+  live?: boolean;
   /** resolved after layout for rendering */
   sourceNode?: GraphNode;
   targetNode?: GraphNode;
@@ -57,7 +62,8 @@ export interface GraphData {
   edges: GraphEdge[];
   blockHeight?: number;
   fetchedAt: string;
-  source: "mock" | "live";
+  source: GraphSource;
+  note?: string;
 }
 
 export const AGENT_STATUS_COLOR: Record<AgentStatus, string> = {
@@ -72,4 +78,12 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   sovereign_agent: "Sovereign",
   persistent_agent: "Persistent",
   precompile: "Precompile",
+};
+
+export const EDGE_TYPE_COLOR: Record<EdgeType, string> = {
+  transfer: "#c8ff4a",
+  call: "#818cf8",
+  async: "#22d3ee",
+  scheduled: "#f472b6",
+  heartbeat: "#64748b",
 };

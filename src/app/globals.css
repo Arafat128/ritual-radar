@@ -6,7 +6,7 @@
   --bg: #050505;
   --lime: #c8ff4a;
   --cyan: #22d3ee;
-  --panel: rgba(12, 12, 14, 0.72);
+  --panel: rgba(10, 10, 14, 0.78);
   --border: rgba(255, 255, 255, 0.1);
 }
 
@@ -33,14 +33,27 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 1rem;
-  backdrop-filter: blur(16px) saturate(1.2);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-/* subtle grid under canvas chrome */
 .radar-grid {
   background-image:
-    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(34, 211, 238, 0.08), transparent),
-    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(200, 255, 74, 0.05), transparent);
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(34, 211, 238, 0.1), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(200, 255, 74, 0.06), transparent),
+    radial-gradient(ellipse 40% 30% at 10% 80%, rgba(129, 140, 248, 0.05), transparent);
+}
+
+/* Prefer reduced motion for accessibility */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

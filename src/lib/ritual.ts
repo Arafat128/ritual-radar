@@ -11,8 +11,12 @@ export const FAUCET_URL = "https://faucet.ritualfoundation.org";
 
 /** Known system / high-degree hubs — hidden by default in the graph */
 export const PRECOMPILE_HINTS: Record<string, string> = {
-  // AgentHeartbeat registry (Persistent heartbeats) — from Rite / explorer usage
   "0xef505e801f1db392b5289690e2ffc20e840a3aca": "AgentHeartbeat",
+  "0x0000000000000000000000000000000000000801": "HTTP precompile",
+  "0x0000000000000000000000000000000000000802": "LLM precompile",
+  "0x000000000000000000000000000000000000080c": "Sovereign Agent precompile",
+  "0x0000000000000000000000000000000000000820": "Persistent Agent precompile",
+  "0x0000000000000000000000000000000000000818": "Image precompile",
 };
 
 export function explorerAddressUrl(addr: string) {

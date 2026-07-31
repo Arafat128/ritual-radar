@@ -1,47 +1,53 @@
 import type { GraphData, GraphEdge, GraphNode } from "@/lib/graphTypes";
 
-/** Deterministic mock neighborhood for UI/layout work before live data */
+/** Deterministic demo neighborhood for UI / offline work (not live chain data) */
 export function buildMockGraph(rootInput: string): GraphData {
-  const root = (rootInput || "0xd3309bf2e2d1f451132dbc34dc5908c442903458").toLowerCase();
+  const root = (
+    rootInput || "0xd3309bf2e2d1f451132dbc34dc5908c442903458"
+  ).toLowerCase();
 
   const nodes: GraphNode[] = [
     {
       id: root,
       type: "eoa",
-      label: "Root (search)",
+      label: "Demo root",
       balance: "2870000000000000000",
       txCount: 142,
       firstSeen: 48_000_000,
       lastSeen: 52_730_000,
+      live: false,
     },
     {
       id: "0xc3abfe878c670016db959b5df10a27e502fe997d",
       type: "sovereign_agent",
-      label: "Rite Sovereign",
+      label: "Demo Sovereign",
       agentStatus: "active",
       balance: "0",
       txCount: 4,
       firstSeen: 52_700_000,
       lastSeen: 52_710_000,
+      live: false,
     },
     {
       id: "0xbbfb6d1c4962dce01ac92e5095fa6c40266d08b0",
       type: "persistent_agent",
-      label: "Live Persistent",
+      label: "Demo Persistent",
       agentStatus: "active",
       balance: "150000000000000000",
       txCount: 890,
       firstSeen: 50_000_000,
       lastSeen: 52_722_500,
+      live: false,
     },
     {
       id: "0x128494472d72d2fb71bb808c041c956184e6c9f2",
       type: "persistent_agent",
-      label: "Persistent B",
+      label: "Demo Persistent B",
       agentStatus: "reviving",
       balance: "80000000000000000",
       txCount: 420,
       lastSeen: 52_720_000,
+      live: false,
     },
     {
       id: "0xef505e801f1db392b5289690e2ffc20e840a3aca",
@@ -49,6 +55,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       label: "AgentHeartbeat",
       txCount: 50_000,
       lastSeen: 52_722_544,
+      live: false,
     },
     {
       id: "0x9dc4c054e53bcc4ce0a0ff09e890a7a8e817f304",
@@ -56,6 +63,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       label: "SovereignFactory",
       txCount: 2_100,
       lastSeen: 52_710_000,
+      live: false,
     },
     {
       id: "0xd4aa9d55215dc8149af57605e70921ea16b73591",
@@ -63,6 +71,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       label: "PersistentFactory",
       txCount: 1_800,
       lastSeen: 52_700_000,
+      live: false,
     },
     {
       id: "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f",
@@ -70,38 +79,44 @@ export function buildMockGraph(rootInput: string): GraphData {
       label: "RadarAgent",
       txCount: 900,
       lastSeen: 52_730_000,
+      live: false,
     },
     {
       id: "0x3c71122f28d6d50fe9d977a0e20ede6e20f28cee",
       type: "eoa",
-      label: "Keeper",
+      label: "Demo Keeper",
       balance: "100000000000000000",
       txCount: 3_200,
       lastSeen: 52_730_400,
+      live: false,
     },
     {
       id: "0xa8063aa535f06cf3fedb8b1da70d6cf09b865d83",
       type: "eoa",
-      label: "Peer EOA",
+      label: "Demo Peer",
       balance: "500000000000000000",
       txCount: 55,
       lastSeen: 52_680_000,
+      live: false,
     },
     {
       id: "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b",
       type: "contract",
-      label: "Scheduler route",
+      label: "Scheduler",
       txCount: 12_000,
       lastSeen: 52_710_000,
+      live: false,
     },
+    // Valid-looking hex address (was invalid 0x…fail before)
     {
-      id: "0xdead00000000000000000000000000000000fail",
+      id: "0xdead00000000000000000000000000000000dead",
       type: "persistent_agent",
-      label: "Failed agent",
+      label: "Demo failed agent",
       agentStatus: "failed",
       balance: "0",
       txCount: 12,
       lastSeen: 51_000_000,
+      live: false,
     },
   ];
 
@@ -116,6 +131,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 3_600_000,
       txHash:
         "0x4b46360f2d7a56e0786951b2fd3ffbdc03824cf17c36e62e0f8713182a8385e2",
+      live: false,
     },
     {
       id: "e2",
@@ -126,6 +142,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 3_700_000,
       txHash:
         "0xaaa1000000000000000000000000000000000000000000000000000000000001",
+      live: false,
     },
     {
       id: "e3",
@@ -136,6 +153,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 30_000,
       txHash:
         "0xbbb2000000000000000000000000000000000000000000000000000000000002",
+      live: false,
     },
     {
       id: "e4",
@@ -146,6 +164,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 90_000,
       txHash:
         "0xbbb3000000000000000000000000000000000000000000000000000000000003",
+      live: false,
     },
     {
       id: "e5",
@@ -156,6 +175,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 86_400_000,
       txHash:
         "0xccc4000000000000000000000000000000000000000000000000000000000004",
+      live: false,
     },
     {
       id: "e6",
@@ -166,6 +186,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 120_000,
       txHash:
         "0xddd5000000000000000000000000000000000000000000000000000000000005",
+      live: false,
     },
     {
       id: "e7",
@@ -176,6 +197,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 172_800_000,
       txHash:
         "0xeee6000000000000000000000000000000000000000000000000000000000006",
+      live: false,
     },
     {
       id: "e8",
@@ -186,6 +208,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 3_500_000,
       txHash:
         "0xfff7000000000000000000000000000000000000000000000000000000000007",
+      live: false,
     },
     {
       id: "e9",
@@ -196,6 +219,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 604_800_000,
       txHash:
         "0x1118000000000000000000000000000000000000000000000000000000000008",
+      live: false,
     },
     {
       id: "e10",
@@ -206,6 +230,7 @@ export function buildMockGraph(rootInput: string): GraphData {
       timestamp: now - 400_000,
       txHash:
         "0x2229000000000000000000000000000000000000000000000000000000000009",
+      live: false,
     },
   ];
 
@@ -216,6 +241,7 @@ export function buildMockGraph(rootInput: string): GraphData {
     blockHeight: 52_722_544,
     fetchedAt: new Date().toISOString(),
     source: "mock",
+    note: "Demo topology only — not chain data. Use Scan for live RPC + agent registry.",
   };
 }
 

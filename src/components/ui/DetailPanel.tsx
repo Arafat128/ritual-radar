@@ -4,13 +4,18 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useMemo } from "react";
 import { formatEther } from "viem";
 import { NODE_TYPE_LABEL } from "@/lib/graphTypes";
-import { explorerAddressUrl, shortAddr } from "@/lib/ritual";
+import {
+  explorerAddressUrl,
+  explorerTxUrl,
+  shortAddr,
+} from "@/lib/ritual";
 import { useGraphStore } from "@/lib/graphStore";
 
 export function DetailPanel() {
   const graph = useGraphStore((s) => s.graph);
   const selectedId = useGraphStore((s) => s.selectedId);
   const setSelected = useGraphStore((s) => s.setSelected);
+  const loadLive = useGraphStore((s) => s.loadLive);
 
   const node = useMemo(
     () => graph?.nodes.find((n) => n.id === selectedId) ?? null,
@@ -19,7 +24,13 @@ export function DetailPanel() {
 
   const connections = useMemo(() => {
     if (!graph || !selectedId) return [];
-    const rows: { peer: string; value: bigint; type: string }[] = [];
+    const rows: {
+      peer: string;
+      value: bigint;
+      type: string;
+      txHash: string;
+      live?: boolean;
+    }[] = [];
     for (const e of graph.edges) {
       if (e.source !== selectedId && e.target !== selectedId) continue;
       const peer = e.source === selectedId ? e.target : e.source;
@@ -29,10 +40,16 @@ export function DetailPanel() {
       } catch {
         /* */
       }
-      rows.push({ peer, value, type: e.type });
+      rows.push({
+        peer,
+        value,
+        type: e.type,
+        txHash: e.txHash,
+        live: e.live,
+      });
     }
     rows.sort((a, b) => (a.value < b.value ? 1 : -1));
-    return rows.slice(0, 8);
+    return rows.slice(0, 10);
   }, [graph, selectedId]);
 
   return (
@@ -43,7 +60,7 @@ export function DetailPanel() {
           animate={{ opacity: 1, x: 0 }}
           exit={{ opacity: 0, x: 24 }}
           transition={{ duration: 0.22 }}
-          className="glass-panel absolute right-3 top-20 z-20 flex w-[min(100%,320px)] flex-col gap-3 p-4"
+          className="glass-panel absolute right-3 top-20 z-20 flex max-h-[min(70vh,520px)] w-[min(100%,320px)] flex-col gap-3 overflow-y-auto p-4"
         >
           <div className="flex items-start justify-between gap-2">
             <div>
@@ -58,6 +75,7 @@ export function DetailPanel() {
               type="button"
               onClick={() => setSelected(null)}
               className="text-white/40 hover:text-white/70"
+              aria-label="Close"
             >
               ✕
             </button>
@@ -72,6 +90,15 @@ export function DetailPanel() {
                 {node.agentStatus}
               </span>
             )}
+            <span
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                node.live
+                  ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                  : "border-white/10 bg-white/5 text-white/40"
+              }`}
+            >
+              {node.live ? "on-chain" : "demo"}
+            </span>
           </div>
 
           <dl className="grid grid-cols-2 gap-2 text-[11px]">
@@ -84,7 +111,7 @@ export function DetailPanel() {
               </dd>
             </div>
             <div>
-              <dt className="text-white/35">Tx count</dt>
+              <dt className="text-white/35">Tx / nonce</dt>
               <dd className="font-mono text-white/80">{node.txCount}</dd>
             </div>
             <div>
@@ -111,7 +138,7 @@ export function DetailPanel() {
               )}
               {connections.map((c) => (
                 <li
-                  key={c.peer + c.type}
+                  key={c.peer + c.type + c.txHash}
                   className="flex items-center justify-between gap-2 font-mono text-[10px] text-white/65"
                 >
                   <button
@@ -121,7 +148,23 @@ export function DetailPanel() {
                   >
                     {shortAddr(c.peer)}
                   </button>
-                  <span className="shrink-0 text-white/35">{c.type}</span>
+                  <span className="flex shrink-0 items-center gap-1 text-white/35">
+                    {c.live === false && (
+                      <span className="text-white/25">demo</span>
+                    )}
+                    {c.type}
+                    {c.txHash && !c.txHash.match(/^0x([0a-f])\1+$/i) && (
+                      <a
+                        href={explorerTxUrl(c.txHash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-cyan-300/70 hover:text-cyan-200"
+                        title="Open tx"
+                      >
+                        ↗
+                      </a>
+                    )}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -135,13 +178,20 @@ export function DetailPanel() {
             >
               Copy
             </button>
+            <button
+              type="button"
+              onClick={() => void loadLive(node.id)}
+              className="rounded-lg border border-cyan-400/30 px-2.5 py-1.5 text-[11px] text-cyan-200 hover:bg-cyan-400/10"
+            >
+              Scan peer
+            </button>
             <a
               href={explorerAddressUrl(node.id)}
               target="_blank"
               rel="noreferrer"
               className="rounded-lg bg-[#c8ff4a]/90 px-2.5 py-1.5 text-[11px] font-semibold text-black hover:bg-[#d4ff6a]"
             >
-              Open explorer ↗
+              Explorer ↗
             </a>
           </div>
         </motion.aside>

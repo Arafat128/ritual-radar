@@ -20,9 +20,15 @@ const display = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "Ritual Radar — 3D address graph",
+  title: "Ritual Radar — live 3D address graph",
   description:
-    "Paste any Ritual Chain address → 3D force graph of connected EOAs, contracts, and Sovereign/Persistent agents with animated value flow.",
+    "Paste any Ritual Chain address → live 3D force graph of EOAs, contracts, and Sovereign/Persistent agents with value-flow edges (chain 1979).",
+  openGraph: {
+    title: "Ritual Radar",
+    description:
+      "Live relationship radar for Ritual Chain addresses, agents, and contracts.",
+    type: "website",
+  },
 };
 
 export default function RootLayout({

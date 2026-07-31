@@ -4,25 +4,31 @@ import { Line } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
+import type { EdgeType } from "@/lib/graphTypes";
+import { EDGE_TYPE_COLOR } from "@/lib/graphTypes";
 
 type Props = {
   start: [number, number, number];
   end: [number, number, number];
   value?: number; // 0..1
   active?: boolean;
+  edgeType?: EdgeType;
+  live?: boolean;
 };
 
-/** Dashed arc with hue-cycling + dash travel (phase 3 — no custom shader yet) */
+/** Dashed flow arc — color by edge type, subtle motion */
 export function SimpleFlowEdge({
   start,
   end,
   value = 0.5,
   active = true,
+  edgeType = "call",
+  live = true,
 }: Props) {
-  // drei Line ref is loosely typed across versions
   const ref = useRef<{ material?: THREE.Material | THREE.Material[] } | null>(
     null
   );
+  const base = EDGE_TYPE_COLOR[edgeType] || "#22d3ee";
 
   const points = useMemo(() => {
     const s = new THREE.Vector3(...start);
@@ -33,7 +39,7 @@ export function SimpleFlowEdge({
       .add(new THREE.Vector3(0, s.distanceTo(e) * 0.18, 0));
     const curve = new THREE.QuadraticBezierCurve3(s, mid, e);
     return curve
-      .getPoints(24)
+      .getPoints(20)
       .map((p) => [p.x, p.y, p.z] as [number, number, number]);
   }, [start, end]);
 
@@ -48,17 +54,17 @@ export function SimpleFlowEdge({
     };
     const t = state.clock.elapsedTime;
     if (typeof mat.dashOffset === "number") {
-      mat.dashOffset = -t * (1.2 + value);
+      mat.dashOffset = -t * (0.9 + value * 0.8);
     }
     if (mat.color) {
-      mat.color.setHSL(
-        (t * 0.05 + value * 0.2) % 1,
-        0.85,
-        active ? 0.55 : 0.28
-      );
+      // slight pulse around base type color
+      const c = new THREE.Color(base);
+      const pulse = 0.92 + Math.sin(t * 2 + value) * 0.08;
+      mat.color.copy(c).multiplyScalar(pulse);
     }
     if (typeof mat.opacity === "number") {
-      mat.opacity = active ? 0.85 : 0.25;
+      const baseOp = live ? 0.88 : 0.42;
+      mat.opacity = active ? baseOp : baseOp * 0.35;
     }
   });
 
@@ -66,14 +72,16 @@ export function SimpleFlowEdge({
     <Line
       ref={ref as never}
       points={points}
-      lineWidth={1 + value * 4}
+      lineWidth={1 + value * 3.5}
       dashed
-      dashScale={3.5}
-      dashSize={0.35}
-      gapSize={0.18}
+      dashScale={3.2}
+      dashSize={0.32}
+      gapSize={0.16}
+      color={base}
       transparent
       toneMapped={false}
       depthWrite={false}
+      opacity={live ? 0.85 : 0.4}
     />
   );
 }

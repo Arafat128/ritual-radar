@@ -39,19 +39,32 @@ Open [http://localhost:3000](http://localhost:3000).
 - **Demo** — mock neighborhood (layout + edges work offline)
 - **Scan** / paste `0x…` — root node enriched from live RPC + `/api/agents/cache`
 
+## Data sources (honest model)
+
+| Layer | Source | Live? |
+|---|---|---|
+| Root balance / code / nonce | Ritual RPC | yes |
+| Chain head (`blk`) | `/api/block` every ~8s | yes |
+| Agent ownership / heartbeats | `explorer…/api/agents/cache` | yes |
+| Recent peers | last ~48 blocks of txs involving address | yes (windowed) |
+| Demo graph | client mock | no |
+
+Explorer does **not** expose a public full tx-history API (no Blockscout-style `txlist`). Edges outside the recent-block window or agent registry are not invented.
+
 ## Build phases
 
 | Phase | Status |
 |---|---|
 | 1 Scaffold + glass design tokens | done |
 | 2 Static 3D graph + force layout + shapes | done |
-| 3 SimpleFlowEdge (dashed + hue cycle) | done |
-| 4 Shader tube connectors | next |
-| 5 Full explorer tx proxy + real edges | next |
-| 6 Depth expand, more filters polish | next |
+| 3 SimpleFlowEdge (typed colors + motion) | done |
+| 4 Live graph: agents + block scan + honesty badges | done |
+| 5 Shader tube connectors | next |
+| 6 Deeper history if explorer APIs open | next |
 
 ## Notes
 
 - Precompiles (e.g. AgentHeartbeat) are **hidden by default** — toggle in the filter bar.
-- Heartbeat edges collapse to one arc per pair; self-schedule loops are node rings, not edges.
-- Live **edge history** needs reverse-engineered explorer APIs (CORS) — currently mock edges + live root classification.
+- Heartbeat edges collapse to one arc per pair.
+- **Demo** is synthetic; **Scan** is live. Auto-refresh reloads live graphs ~28s.
+- Depth slider = hop limit from root.

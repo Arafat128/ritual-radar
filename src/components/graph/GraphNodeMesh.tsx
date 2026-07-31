@@ -1,10 +1,12 @@
 "use client";
 
+import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { AgentStatus, GraphNode, NodeType } from "@/lib/graphTypes";
 import { AGENT_STATUS_COLOR } from "@/lib/graphTypes";
+import { shortAddr } from "@/lib/ritual";
 
 function baseColor(type: NodeType, status?: AgentStatus): string {
   if (status) return AGENT_STATUS_COLOR[status];
@@ -24,9 +26,10 @@ function baseColor(type: NodeType, status?: AgentStatus): string {
   }
 }
 
-function sizeFor(n: GraphNode) {
+function sizeFor(n: GraphNode, isRoot?: boolean) {
   const t = Math.log10(Math.max(1, n.txCount));
-  return 0.22 + Math.min(0.55, t * 0.12);
+  const base = 0.22 + Math.min(0.55, t * 0.12);
+  return isRoot ? base * 1.25 : base;
 }
 
 type Props = {
@@ -43,7 +46,7 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
     () => baseColor(node.type, node.agentStatus),
     [node.type, node.agentStatus]
   );
-  const r = sizeFor(node);
+  const r = sizeFor(node, isRoot);
   const pos: [number, number, number] = [
     node.x ?? 0,
     node.y ?? 0,
@@ -53,7 +56,8 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
   useFrame((state) => {
     const t = state.clock.elapsedTime;
     if (ring.current && (isRoot || node.agentStatus === "reviving")) {
-      const s = 1 + Math.sin(t * (node.agentStatus === "reviving" ? 3 : 2)) * 0.08;
+      const s =
+        1 + Math.sin(t * (node.agentStatus === "reviving" ? 3 : 2)) * 0.08;
       ring.current.scale.setScalar(s);
       const mat = ring.current.material as THREE.MeshBasicMaterial;
       mat.opacity =
@@ -66,7 +70,8 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
     }
   });
 
-  const opacity = node.agentStatus === "failed" ? 0.32 : 0.92;
+  const opacity =
+    node.agentStatus === "failed" ? 0.32 : node.live === false ? 0.72 : 0.94;
 
   const mesh = (() => {
     const common = {
@@ -74,51 +79,43 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
         e.stopPropagation();
         onSelect(node.id);
       },
+      onPointerOver: (e: { stopPropagation: () => void }) => {
+        e.stopPropagation();
+        document.body.style.cursor = "pointer";
+      },
+      onPointerOut: () => {
+        document.body.style.cursor = "default";
+      },
+    };
+    const matProps = {
+      color,
+      emissive: color,
+      emissiveIntensity: selected ? 0.65 : isRoot ? 0.4 : 0.22,
+      transparent: true,
+      opacity,
+      roughness: 0.35,
+      metalness: 0.4,
     };
     switch (node.type) {
       case "contract":
         return (
           <mesh {...common}>
             <boxGeometry args={[r * 1.4, r * 1.4, r * 1.4]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={selected ? 0.55 : 0.22}
-              transparent
-              opacity={opacity}
-              roughness={0.35}
-              metalness={0.4}
-            />
+            <meshStandardMaterial {...matProps} />
           </mesh>
         );
       case "sovereign_agent":
         return (
           <mesh {...common}>
             <octahedronGeometry args={[r, 0]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={selected ? 0.7 : 0.3}
-              transparent
-              opacity={opacity}
-              roughness={0.25}
-              metalness={0.55}
-            />
+            <meshStandardMaterial {...matProps} metalness={0.55} />
           </mesh>
         );
       case "persistent_agent":
         return (
           <mesh {...common}>
             <icosahedronGeometry args={[r, 0]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={selected ? 0.65 : 0.28}
-              transparent
-              opacity={opacity}
-              roughness={0.3}
-              metalness={0.45}
-            />
+            <meshStandardMaterial {...matProps} />
           </mesh>
         );
       case "precompile":
@@ -138,20 +135,14 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
       default:
         return (
           <mesh {...common}>
-            <sphereGeometry args={[r, 24, 24]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={selected ? 0.5 : 0.18}
-              transparent
-              opacity={opacity}
-              roughness={0.4}
-              metalness={0.2}
-            />
+            <sphereGeometry args={[r, 20, 20]} />
+            <meshStandardMaterial {...matProps} metalness={0.2} />
           </mesh>
         );
     }
   })();
+
+  const showLabel = isRoot || selected || node.type.includes("agent");
 
   return (
     <group ref={group} position={pos}>
@@ -168,7 +159,6 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
           />
         </mesh>
       )}
-      {/* Self-schedule / heartbeat pulse ring for agents */}
       {(node.type === "persistent_agent" || node.type === "sovereign_agent") &&
         node.agentStatus === "active" && (
           <mesh rotation={[Math.PI / 2.4, 0.2, 0]}>
@@ -182,6 +172,24 @@ export function GraphNodeMesh({ node, isRoot, selected, onSelect }: Props) {
             />
           </mesh>
         )}
+      {showLabel && (
+        <Html
+          center
+          distanceFactor={10}
+          style={{ pointerEvents: "none", userSelect: "none" }}
+          position={[0, r + 0.35, 0]}
+        >
+          <div
+            className={`whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm ${
+              isRoot
+                ? "border-[#c8ff4a]/40 bg-black/70 text-[#c8ff4a]"
+                : "border-white/15 bg-black/65 text-white/75"
+            }`}
+          >
+            {node.label || shortAddr(node.id, 4)}
+          </div>
+        </Html>
+      )}
     </group>
   );
 }
