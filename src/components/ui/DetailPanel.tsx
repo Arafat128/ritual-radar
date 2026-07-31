@@ -16,11 +16,16 @@ export function DetailPanel() {
   const selectedId = useGraphStore((s) => s.selectedId);
   const setSelected = useGraphStore((s) => s.setSelected);
   const loadLive = useGraphStore((s) => s.loadLive);
+  const loadMock = useGraphStore((s) => s.loadMock);
 
   const node = useMemo(
     () => graph?.nodes.find((n) => n.id === selectedId) ?? null,
     [graph, selectedId]
   );
+
+  /** Demo graph: re-root mock topology. Live graph: fetch chain data for peer. */
+  const isDemoContext =
+    graph?.source === "mock" || node?.live === false;
 
   const connections = useMemo(() => {
     if (!graph || !selectedId) return [];
@@ -180,11 +185,33 @@ export function DetailPanel() {
             </button>
             <button
               type="button"
-              onClick={() => void loadLive(node.id)}
+              onClick={() => {
+                if (isDemoContext) {
+                  // Stay in demo: re-root synthetic graph so connections remain
+                  loadMock(node.id);
+                } else {
+                  void loadLive(node.id);
+                }
+              }}
               className="rounded-lg border border-cyan-400/30 px-2.5 py-1.5 text-[11px] text-cyan-200 hover:bg-cyan-400/10"
+              title={
+                isDemoContext
+                  ? "Re-center the demo graph on this address (keeps demo edges)"
+                  : "Fetch live on-chain graph for this address"
+              }
             >
-              Scan peer
+              {isDemoContext ? "Focus peer" : "Scan live"}
             </button>
+            {isDemoContext && (
+              <button
+                type="button"
+                onClick={() => void loadLive(node.id)}
+                className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[11px] text-white/55 hover:bg-white/5"
+                title="Query Ritual RPC for this address (may have few/no edges if inactive)"
+              >
+                Try live
+              </button>
+            )}
             <a
               href={explorerAddressUrl(node.id)}
               target="_blank"

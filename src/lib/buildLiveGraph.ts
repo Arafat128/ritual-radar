@@ -539,34 +539,48 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
     live: true,
   });
 
-  // If graph is sparse, attach labeled system hubs as context (not fake edges to random agents)
+  // If graph is sparse, attach labeled system hubs with orientation edges
+  // (so the filter/UI still shows neighbors — not invented app history)
   if (edges.length === 0) {
-    for (const hub of [
+    const hubs = [
       "0x532f0df0896f353d8c3dd8cc134e8129da2a3948",
       "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b",
       HEARTBEAT,
-    ]) {
+    ] as const;
+    for (const hub of hubs) {
       ensureNode(nodes, hub, {
         type: PRECOMPILE_HINTS[hub] ? "precompile" : "contract",
         label: labelFor(hub),
         live: true,
         txCount: 0,
       });
+      pushEdge(edges, edgeSeen, {
+        source: root,
+        target: hub,
+        type: "call",
+        value: "0",
+        timestamp: Date.now(),
+        txHash: "0x" + "0".repeat(64),
+        live: true,
+      });
     }
   }
 
-  const liveEdges = edges.filter((e) => e.live !== false).length;
+  // Orientation-only edges use zero hash — exclude from "rich live" count
+  const realTxOrAgentEdges = edges.filter(
+    (e) => e.live !== false && e.txHash && !/^0x0+$/i.test(e.txHash)
+  ).length;
   const graph: GraphData = {
     root,
     nodes: Array.from(nodes.values()),
     edges,
     blockHeight,
     fetchedAt: new Date().toISOString(),
-    source: liveEdges > 0 ? "live" : "live_partial",
+    source: realTxOrAgentEdges > 0 ? "live" : "live_partial",
     note:
-      liveEdges > 0
+      realTxOrAgentEdges > 0
         ? `Live graph: agent registry + last ${blocksScanned} blocks of txs involving this address. Not full historical explorer history.`
-        : `Root is live from RPC. No recent txs or agent links found in last ${blocksScanned} blocks — system hubs shown for orientation only (no fabricated edges).`,
+        : `Root is live from RPC. No agent links or recent txs in last ${blocksScanned} blocks — showing Ritual system hubs for orientation only (not personal tx history). Use Demo for a full sample graph.`,
   };
 
   return {
@@ -585,7 +599,7 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
       persistentCount,
       sovereignCount,
       blocksScanned,
-      liveEdges,
+      liveEdges: realTxOrAgentEdges,
       scanWindowBlocks: scanN,
     },
   };
