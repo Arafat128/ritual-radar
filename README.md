@@ -2,6 +2,11 @@
 
 Paste any **Ritual Chain** address (EOA, contract, Sovereign / Persistent agent) → **3D force-directed graph** of connections with animated value-flow along edges.
 
+| | |
+|--|--|
+| **Live** | [https://ritual-radar.vercel.app](https://ritual-radar.vercel.app) |
+| **GitHub** | [Arafat128/ritual-radar](https://github.com/Arafat128/ritual-radar) |
+
 > Not a clone of `agents.ritualfoundation.org` honeycomb roster. This tool traces **relationships and flow** for a specific address.
 
 ## Stack
