@@ -51,9 +51,26 @@ export interface GraphEdge {
   timestamp: number;
   txHash: string;
   live?: boolean;
+  /** block number when known (live txs) */
+  blockNumber?: number;
+  /** first 4 bytes of input as 0x-hex (contract calls) */
+  methodId?: string;
   /** resolved after layout for rendering */
   sourceNode?: GraphNode;
   targetNode?: GraphNode;
+}
+
+/** One on-chain interaction (for side panel tx list) */
+export interface GraphInteraction {
+  hash: string;
+  from: string;
+  to: string | null;
+  value: string;
+  timestamp: number;
+  blockNumber: number;
+  type: EdgeType;
+  methodId?: string;
+  direction: "out" | "in" | "self";
 }
 
 export interface GraphData {
@@ -64,6 +81,10 @@ export interface GraphData {
   fetchedAt: string;
   source: GraphSource;
   note?: string;
+  /** true when deep tx scan was enabled for this result */
+  fullHistory?: boolean;
+  /** real txs involving root (newest first), only when fullHistory */
+  interactions?: GraphInteraction[];
 }
 
 export const AGENT_STATUS_COLOR: Record<AgentStatus, string> = {

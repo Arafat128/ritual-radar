@@ -35,6 +35,8 @@ export function DetailPanel() {
       type: string;
       txHash: string;
       live?: boolean;
+      methodId?: string;
+      blockNumber?: number;
     }[] = [];
     for (const e of graph.edges) {
       if (e.source !== selectedId && e.target !== selectedId) continue;
@@ -51,10 +53,19 @@ export function DetailPanel() {
         type: e.type,
         txHash: e.txHash,
         live: e.live,
+        methodId: e.methodId,
+        blockNumber: e.blockNumber,
       });
     }
     rows.sort((a, b) => (a.value < b.value ? 1 : -1));
-    return rows.slice(0, 10);
+    return rows.slice(0, graph.fullHistory ? 24 : 10);
+  }, [graph, selectedId]);
+
+  /** Root interactions from full-tx scan (every real tx with explorer link) */
+  const rootInteractions = useMemo(() => {
+    if (!graph?.fullHistory || !graph.interactions?.length) return [];
+    if (!selectedId || selectedId !== graph.root) return [];
+    return graph.interactions;
   }, [graph, selectedId]);
 
   return (
@@ -164,9 +175,9 @@ export function DetailPanel() {
                         target="_blank"
                         rel="noreferrer"
                         className="text-cyan-300/70 hover:text-cyan-200"
-                        title="Open tx"
+                        title="Open tx on explorer"
                       >
-                        ↗
+                        tx↗
                       </a>
                     )}
                   </span>
@@ -174,6 +185,66 @@ export function DetailPanel() {
               ))}
             </ul>
           </div>
+
+          {rootInteractions.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-[10px] uppercase tracking-wide text-emerald-200/80">
+                Full tx history · {rootInteractions.length} in window
+              </p>
+              <ul className="max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                {rootInteractions.map((ix) => (
+                  <li
+                    key={ix.hash}
+                    className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 font-mono text-[10px] text-white/70"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={
+                          ix.direction === "out"
+                            ? "text-amber-200/90"
+                            : ix.direction === "in"
+                              ? "text-emerald-200/90"
+                              : "text-white/50"
+                        }
+                      >
+                        {ix.direction === "out"
+                          ? "OUT"
+                          : ix.direction === "in"
+                            ? "IN"
+                            : "SELF"}{" "}
+                        · {ix.type}
+                      </span>
+                      <a
+                        href={explorerTxUrl(ix.hash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="shrink-0 text-cyan-300 hover:text-cyan-100"
+                      >
+                        {shortAddr(ix.hash, 6)} ↗
+                      </a>
+                    </div>
+                    <div className="mt-0.5 truncate text-white/40">
+                      {ix.direction === "out" ? "→" : "←"}{" "}
+                      {ix.to ? shortAddr(ix.to, 5) : "contract create"}
+                      {ix.methodId ? ` · ${ix.methodId}` : ""}
+                      {ix.value !== "0" ? (
+                        <>
+                          {" · "}
+                          {Number(formatEther(BigInt(ix.value))).toFixed(4)} RIT
+                        </>
+                      ) : null}
+                      {" · blk "}
+                      {ix.blockNumber.toLocaleString()}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1.5 text-[9px] text-white/30">
+                Click any hash to open the Ritual explorer. Window is recent
+                blocks only (full archive needs explorer APIs).
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-2">
             <button

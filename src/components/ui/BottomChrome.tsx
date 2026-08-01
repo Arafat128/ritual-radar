@@ -77,6 +77,9 @@ export function BottomChrome({ compact = false }: { compact?: boolean }) {
                 <span className="hidden font-mono sm:inline">
                   scanned {meta.blocksScanned} blocks · agents{" "}
                   {meta.persistentCount ?? "—"}P/{meta.sovereignCount ?? "—"}S
+                  {meta.fullHistory
+                    ? ` · full tx (${meta.realTxCount ?? 0})`
+                    : ""}
                 </span>
               )}
             </>

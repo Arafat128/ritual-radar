@@ -35,17 +35,32 @@ export function RadarApp() {
   const searchParams = useSearchParams();
   const loadLive = useGraphStore((s) => s.loadLive);
   const loadMock = useGraphStore((s) => s.loadMock);
+  const setEmbedMode = useGraphStore((s) => s.setEmbedMode);
+  const setFullHistory = useGraphStore((s) => s.setFullHistory);
+  const fullHistory = useGraphStore((s) => s.fullHistory);
   const graph = useGraphStore((s) => s.graph);
 
   const address = (searchParams.get("address") || "").trim();
   const demo = searchParams.get("demo") === "1";
   const embed =
     searchParams.get("embed") === "1" || searchParams.get("embed") === "true";
+  const fullParam =
+    searchParams.get("full") === "1" || searchParams.get("full") === "true";
 
   const bootKey = useMemo(
-    () => `${demo ? "d" : "l"}:${address.toLowerCase()}:${embed ? "e" : "f"}`,
-    [address, demo, embed]
+    () =>
+      `${demo ? "d" : "l"}:${address.toLowerCase()}:${embed ? "e" : "f"}:${
+        fullParam ? "F" : "n"
+      }`,
+    [address, demo, embed, fullParam]
   );
+
+  // Embed vs full site + optional full-tx enable (never in embed)
+  useEffect(() => {
+    setEmbedMode(embed);
+    if (embed) return;
+    if (fullParam) setFullHistory(true);
+  }, [embed, fullParam, setEmbedMode, setFullHistory]);
 
   useEffect(() => {
     if (demo) {
@@ -53,7 +68,9 @@ export function RadarApp() {
       return;
     }
     if (isAddr(address)) {
-      void loadLive(address);
+      void loadLive(address, {
+        fullHistory: embed ? false : fullParam || undefined,
+      });
     }
     // Only re-run when deep-link identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -66,15 +83,20 @@ export function RadarApp() {
     if (!isAddr(graph.root)) return;
     try {
       const url = new URL(window.location.href);
-      const cur = (url.searchParams.get("address") || "").toLowerCase();
-      if (cur === graph.root.toLowerCase()) return;
       url.searchParams.set("address", graph.root);
-      if (embed) url.searchParams.set("embed", "1");
+      if (embed) {
+        url.searchParams.set("embed", "1");
+        url.searchParams.delete("full");
+      } else if (fullHistory) {
+        url.searchParams.set("full", "1");
+      } else {
+        url.searchParams.delete("full");
+      }
       window.history.replaceState({}, "", url.toString());
     } catch {
       /* ignore */
     }
-  }, [graph?.root, graph?.source, embed]);
+  }, [graph?.root, graph?.source, embed, fullHistory]);
 
   return (
     <main

@@ -44,6 +44,10 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
   const graph = useGraphStore((s) => s.graph);
   const autoRefresh = useGraphStore((s) => s.autoRefresh);
   const setAutoRefresh = useGraphStore((s) => s.setAutoRefresh);
+  const fullHistory = useGraphStore((s) => s.fullHistory);
+  const setFullHistory = useGraphStore((s) => s.setFullHistory);
+  const embedMode = useGraphStore((s) => s.embedMode);
+  const meta = useGraphStore((s) => s.meta);
   const rootLive = useGraphStore((s) => s.rootLive);
   const lastRefreshAt = useGraphStore((s) => s.lastRefreshAt);
   const [local, setLocal] = useState(query);
@@ -193,6 +197,27 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
           />
           <span className="font-mono text-white/70">{depth}</span>
         </label>
+        {!compact && !embedMode && (
+          <label
+            className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 ${
+              fullHistory
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-100"
+                : "border-white/10 text-white/45"
+            }`}
+            title="Deep-scan recent Ritual blocks for every tx this address sent/received. Radar website only — not available in embeds. Each edge links to the explorer."
+          >
+            <input
+              type="checkbox"
+              checked={fullHistory}
+              disabled={loading}
+              onChange={(e) => setFullHistory(e.target.checked)}
+              className="accent-emerald-400"
+            />
+            <span className="text-[10px] font-semibold uppercase tracking-wide">
+              Full tx
+            </span>
+          </label>
+        )}
         <label className="flex items-center gap-1.5" title="Refresh live graph ~28s">
           <input
             type="checkbox"
@@ -209,6 +234,11 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
           />
           blk {blockHeight != null ? blockHeight.toLocaleString() : "—"}
         </span>
+        {meta?.fullHistory && meta.realTxCount != null && (
+          <span className="hidden font-mono text-emerald-300/80 md:inline">
+            {meta.realTxCount} txs · {meta.blocksScanned ?? "?"} blk
+          </span>
+        )}
         {ageSec != null && graph && (
           <span className="hidden font-mono text-white/30 md:inline">
             {ageSec < 5 ? "just now" : `${ageSec}s ago`}

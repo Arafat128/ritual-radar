@@ -10,6 +10,7 @@ import type {
   AgentStatus,
   GraphData,
   GraphEdge,
+  GraphInteraction,
   GraphNode,
   NodeType,
 } from "@/lib/graphTypes";
@@ -20,9 +21,25 @@ const HEARTBEAT = "0xef505e801f1db392b5289690e2ffc20e840a3aca";
 const AGENTS_CACHE =
   "https://explorer.ritualfoundation.org/api/agents/cache";
 
-/** How many recent blocks to scan for txs (Ritual ~0.35s/block). */
-const BLOCK_SCAN = Number(process.env.RADAR_BLOCK_SCAN || 48);
-const SCAN_CONCURRENCY = 12;
+/** Light scan (default) — fast neighborhood peek. */
+const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 48);
+/**
+ * Full tx history (opt-in on Radar site only).
+ * Ritual ~0.35s/block → 900 blocks ≈ 5 minutes of chain time.
+ */
+const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 900);
+const SCAN_CONCURRENCY = 16;
+/** Cap graph edges for WebGL performance */
+const MAX_TX_EDGES = 150;
+const MAX_INTERACTIONS_LIST = 200;
+
+export type BuildLiveGraphOpts = {
+  /**
+   * Deep-scan recent chain history for every tx involving the address.
+   * Only enabled via Radar website toggle — not for Rite embeds.
+   */
+  fullHistory?: boolean;
+};
 
 type PersistentEntry = {
   address?: string;
@@ -60,6 +77,8 @@ export type LiveGraphResult = {
     blocksScanned: number;
     liveEdges: number;
     scanWindowBlocks: number;
+    fullHistory: boolean;
+    realTxCount: number;
   };
 };
 
@@ -124,14 +143,18 @@ function ensureNode(
 function pushEdge(
   edges: GraphEdge[],
   seen: Set<string>,
-  e: Omit<GraphEdge, "id"> & { id?: string }
+  e: Omit<GraphEdge, "id"> & { id?: string },
+  opts?: { allowSelf?: boolean }
 ) {
   const src = nodeId(e.source);
-  const tgt = nodeId(e.target);
-  if (src === tgt) return;
+  const tgt = e.target ? nodeId(e.target) : "";
+  if (!tgt) return;
+  if (src === tgt && !opts?.allowSelf) return;
   const id =
     e.id ||
-    `${e.type}:${src.slice(0, 10)}:${tgt.slice(0, 10)}:${e.txHash?.slice(0, 14) || e.timestamp}`;
+    (e.txHash && !/^0x0+$/i.test(e.txHash)
+      ? `tx:${e.txHash.toLowerCase()}`
+      : `${e.type}:${src.slice(0, 10)}:${tgt.slice(0, 10)}:${e.timestamp}`);
   if (seen.has(id)) return;
   seen.add(id);
   edges.push({
@@ -143,7 +166,19 @@ function pushEdge(
     timestamp: e.timestamp,
     txHash: e.txHash || ("0x" + "0".repeat(64)),
     live: e.live ?? true,
+    blockNumber: e.blockNumber,
+    methodId: e.methodId,
   });
+}
+
+function methodIdFromInput(input: unknown): string | undefined {
+  if (typeof input !== "string" || input.length < 10) return undefined;
+  if (!input.startsWith("0x")) return undefined;
+  return input.slice(0, 10).toLowerCase();
+}
+
+function isRealTxHash(h: string | undefined): boolean {
+  return Boolean(h && /^0x[a-fA-F0-9]{64}$/.test(h) && !/^0x0+$/i.test(h));
 }
 
 async function mapPool<T, R>(
@@ -177,11 +212,15 @@ function classifyTx(
   return "call";
 }
 
-export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult> {
+export async function buildLiveGraph(
+  rootInput: string,
+  opts: BuildLiveGraphOpts = {}
+): Promise<LiveGraphResult> {
+  const fullHistory = Boolean(opts.fullHistory);
   const root = nodeId(rootInput);
   const client = createPublicClient({
     transport: http(RPC_URL, {
-      timeout: 18_000,
+      timeout: fullHistory ? 25_000 : 18_000,
       retryCount: 3,
       retryDelay: 350,
     }),
@@ -431,74 +470,141 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
     }
   }
 
-  // --- Recent block scan for real txs involving root ---
+  // --- Block scan: light peek OR full interaction history (opt-in) ---
   let blocksScanned = 0;
-  const scanN = Math.max(8, Math.min(BLOCK_SCAN, 96));
-  const blockIndexes = Array.from({ length: scanN }, (_, i) => blockHeight - i);
+  const scanCap = fullHistory
+    ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 2000))
+    : Math.max(8, Math.min(BLOCK_SCAN_LIGHT, 96));
+  const blockIndexes = Array.from(
+    { length: scanCap },
+    (_, i) => blockHeight - i
+  ).filter((n) => n >= 0);
+
+  const interactions: GraphInteraction[] = [];
+  let realTxHits = 0;
 
   try {
-    const blocks = await mapPool(blockIndexes, SCAN_CONCURRENCY, async (n) => {
-      try {
-        return await client.getBlock({
-          blockNumber: BigInt(n),
-          includeTransactions: true,
-        });
-      } catch {
-        return null;
-      }
-    });
-
-    for (const block of blocks) {
-      if (!block) continue;
-      blocksScanned++;
-      const ts = Number(block.timestamp) * 1000;
-      const txs = block.transactions as (Hash | Transaction)[];
-      for (const raw of txs) {
-        if (typeof raw === "string") continue;
-        const tx = raw as Transaction;
-        const from = nodeId(tx.from || "");
-        const to = tx.to ? nodeId(tx.to) : null;
-        if (from !== root && to !== root) continue;
-
-        const peer = from === root ? to : from;
-        if (!peer || !to) continue;
-
-        const value = tx.value ?? BigInt(0);
-        const edgeType = classifyTx(from, to, value);
-
-        let peerType: NodeType = "eoa";
-        if (PRECOMPILE_HINTS[peer]) peerType = "precompile";
-        else if (KNOWN_CONTRACTS[peer]) peerType = "contract";
-
-        // refine peer type from agent cache
-        if (persistent.some((p) => nodeId(p.address || p.info?.agentAddress || "") === peer)) {
-          peerType = "persistent_agent";
-        } else if (sovereign.some((s) => nodeId(s.address || "") === peer)) {
-          peerType = "sovereign_agent";
+    // Chunked pools so full history stays within serverless time budget
+    const chunkSize = fullHistory ? 120 : scanCap;
+    for (let off = 0; off < blockIndexes.length; off += chunkSize) {
+      const slice = blockIndexes.slice(off, off + chunkSize);
+      const blocks = await mapPool(slice, SCAN_CONCURRENCY, async (n) => {
+        try {
+          return await client.getBlock({
+            blockNumber: BigInt(n),
+            includeTransactions: true,
+          });
+        } catch {
+          return null;
         }
+      });
 
-        ensureNode(nodes, peer, {
-          type: peerType,
-          label: labelFor(peer),
-          live: true,
-          lastSeen: Number(block.number),
-          txCount: 1,
-        });
+      for (const block of blocks) {
+        if (!block) continue;
+        blocksScanned++;
+        const ts = Number(block.timestamp) * 1000;
+        const bn = Number(block.number);
+        const txs = block.transactions as (Hash | Transaction)[];
+        for (const raw of txs) {
+          if (typeof raw === "string") continue;
+          const tx = raw as Transaction;
+          const from = nodeId(tx.from || "");
+          const to = tx.to ? nodeId(tx.to) : null;
+          if (from !== root && to !== root) continue;
+          if (!isRealTxHash(tx.hash)) continue;
 
-        pushEdge(edges, edgeSeen, {
-          source: from,
-          target: to,
-          type: edgeType,
-          value: value.toString(),
-          timestamp: ts,
-          txHash: tx.hash,
-          live: true,
-        });
+          realTxHits++;
+          const value = tx.value ?? BigInt(0);
+          const edgeType = classifyTx(from, to, value);
+          const methodId = methodIdFromInput(
+            (tx as Transaction & { input?: string }).input ??
+              (tx as { data?: string }).data
+          );
+
+          const direction: GraphInteraction["direction"] =
+            from === root && to === root
+              ? "self"
+              : from === root
+                ? "out"
+                : "in";
+
+          interactions.push({
+            hash: tx.hash,
+            from,
+            to,
+            value: value.toString(),
+            timestamp: ts,
+            blockNumber: bn,
+            type: edgeType,
+            methodId,
+            direction,
+          });
+
+          // Contract create: to is null — skip edge geometry, still list interaction
+          if (!to) continue;
+
+          const peer = from === root ? to : from;
+          let peerType: NodeType = "eoa";
+          if (PRECOMPILE_HINTS[peer]) peerType = "precompile";
+          else if (KNOWN_CONTRACTS[peer]) peerType = "contract";
+          if (
+            persistent.some(
+              (p) =>
+                nodeId(p.address || p.info?.agentAddress || "") === peer
+            )
+          ) {
+            peerType = "persistent_agent";
+          } else if (
+            sovereign.some((s) => nodeId(s.address || "") === peer)
+          ) {
+            peerType = "sovereign_agent";
+          }
+
+          ensureNode(nodes, peer, {
+            type: peerType,
+            label: labelFor(peer),
+            live: true,
+            lastSeen: bn,
+            txCount: 1,
+          });
+
+          pushEdge(
+            edges,
+            edgeSeen,
+            {
+              source: from,
+              target: to,
+              type: edgeType,
+              value: value.toString(),
+              timestamp: ts,
+              txHash: tx.hash,
+              live: true,
+              blockNumber: bn,
+              methodId,
+            },
+            { allowSelf: false }
+          );
+        }
       }
+
+      // Early stop light mode once we have enough sample edges
+      if (!fullHistory && realTxHits >= 24) break;
     }
   } catch {
     /* scan best-effort */
   }
+
+  // Newest first; cap for UI + renderer
+  interactions.sort((a, b) => b.blockNumber - a.blockNumber);
+  const interactionsCapped = interactions.slice(0, MAX_INTERACTIONS_LIST);
+
+  // Prefer real-tx edges; drop oldest if over cap
+  const realEdges = edges.filter((e) => isRealTxHash(e.txHash));
+  const otherEdges = edges.filter((e) => !isRealTxHash(e.txHash));
+  realEdges.sort((a, b) => b.timestamp - a.timestamp);
+  const trimmedReal = realEdges.slice(0, MAX_TX_EDGES);
+  edges.length = 0;
+  edges.push(...trimmedReal, ...otherEdges);
 
   // Enrich peer balances for top peers (cap RPC load)
   const peers = Array.from(nodes.keys())
@@ -539,9 +645,9 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
     live: true,
   });
 
-  // If graph is sparse, attach labeled system hubs with orientation edges
-  // (so the filter/UI still shows neighbors — not invented app history)
-  if (edges.length === 0) {
+  // If graph is sparse (and not mid full-history with hits only in list), hubs for orientation
+  const hasRealTxEdge = edges.some((e) => isRealTxHash(e.txHash));
+  if (!hasRealTxEdge && realTxHits === 0) {
     const hubs = [
       "0x532f0df0896f353d8c3dd8cc134e8129da2a3948",
       "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b",
@@ -566,21 +672,28 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
     }
   }
 
-  // Orientation-only edges use zero hash — exclude from "rich live" count
   const realTxOrAgentEdges = edges.filter(
-    (e) => e.live !== false && e.txHash && !/^0x0+$/i.test(e.txHash)
+    (e) => e.live !== false && isRealTxHash(e.txHash)
   ).length;
+
+  const note = fullHistory
+    ? realTxHits > 0
+      ? `Full tx mode: found ${realTxHits} interaction(s) in last ${blocksScanned} blocks. Each edge has an explorer tx link. Window is recent chain history (not forever) — explorer has no public full archive API.`
+      : `Full tx mode: scanned ${blocksScanned} blocks — no txs involving this address in that window. Agent registry links may still appear.`
+    : realTxOrAgentEdges > 0
+      ? `Live graph: agent registry + last ${blocksScanned} blocks. Enable “Full tx history” on Ritual Radar for a deeper scan of every interaction with explorer links.`
+      : `Root is live from RPC. No recent txs in last ${blocksScanned} blocks — system hubs for orientation. Enable “Full tx history” on the Radar site for a deeper scan.`;
+
   const graph: GraphData = {
     root,
     nodes: Array.from(nodes.values()),
     edges,
     blockHeight,
     fetchedAt: new Date().toISOString(),
-    source: realTxOrAgentEdges > 0 ? "live" : "live_partial",
-    note:
-      realTxOrAgentEdges > 0
-        ? `Live graph: agent registry + last ${blocksScanned} blocks of txs involving this address. Not full historical explorer history.`
-        : `Root is live from RPC. No agent links or recent txs in last ${blocksScanned} blocks — showing Ritual system hubs for orientation only (not personal tx history). Use Demo for a full sample graph.`,
+    source: realTxHits > 0 || realTxOrAgentEdges > 0 ? "live" : "live_partial",
+    note,
+    fullHistory,
+    interactions: fullHistory ? interactionsCapped : undefined,
   };
 
   return {
@@ -600,7 +713,9 @@ export async function buildLiveGraph(rootInput: string): Promise<LiveGraphResult
       sovereignCount,
       blocksScanned,
       liveEdges: realTxOrAgentEdges,
-      scanWindowBlocks: scanN,
+      scanWindowBlocks: scanCap,
+      fullHistory,
+      realTxCount: realTxHits,
     },
   };
 }

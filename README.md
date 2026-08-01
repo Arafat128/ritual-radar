@@ -13,11 +13,22 @@ Paste any **Ritual Chain** address (EOA, contract, Sovereign / Persistent agent)
 | Query | Effect |
 |-------|--------|
 | `?address=0x…` | Auto live scan of that address |
-| `?embed=1` | Compact chrome for iframe embed |
+| `?embed=1` | Compact chrome for iframe embed (**no full tx mode**) |
 | `?demo=1` | Open demo graph (`address` optional as root) |
+| `?full=1` | Enable **Full tx history** (Radar website only) |
 
 Example embed:  
 `https://ritual-radar.vercel.app/?address=0x50a3…&embed=1`
+
+### Full tx history (opt-in)
+
+On the **Ritual Radar website only** (not Rite embeds), toggle **Full tx** in the top bar (or `?full=1`).
+
+- Deep-scans recent Ritual blocks for **every** tx involving the address  
+- Draws each interaction as a graph edge with an **explorer tx link**  
+- Side panel lists OUT/IN transfers + method id + block  
+- Preference stored in `localStorage`  
+- Embeds always stay on light scan (performance + product rule)
 
 > Not a clone of `agents.ritualfoundation.org` honeycomb roster. This tool traces **relationships and flow** for a specific address.
 

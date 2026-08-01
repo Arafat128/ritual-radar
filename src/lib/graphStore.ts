@@ -18,6 +18,17 @@ export type Filters = {
   depth: number;
 };
 
+const FULL_TX_STORAGE_KEY = "ritual-radar-full-tx";
+
+function readStoredFullTx(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(FULL_TX_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 type GraphStore = {
   query: string;
   loading: boolean;
@@ -29,6 +40,12 @@ type GraphStore = {
   blockHeight: number | null;
   lastRefreshAt: number | null;
   autoRefresh: boolean;
+  /**
+   * Opt-in deep tx scan — only for full Radar website.
+   * Embeds always force this false.
+   */
+  fullHistory: boolean;
+  embedMode: boolean;
   rootLive: {
     balanceRit?: string;
     type?: string;
@@ -39,19 +56,26 @@ type GraphStore = {
     blocksScanned?: number;
     persistentCount?: number;
     sovereignCount?: number;
+    fullHistory?: boolean;
+    realTxCount?: number;
   } | null;
   setQuery: (q: string) => void;
   setSelected: (id: string | null) => void;
   setTimelineT: (t: number) => void;
   setBlockHeight: (n: number | null) => void;
   setAutoRefresh: (v: boolean) => void;
+  setEmbedMode: (v: boolean) => void;
+  setFullHistory: (v: boolean) => void;
   toggleNodeType: (t: NodeType) => void;
   toggleEdgeType: (t: EdgeType) => void;
   setShowPrecompiles: (v: boolean) => void;
   setDepth: (d: number) => void;
   setMinValueEth: (n: number) => void;
   loadMock: (address?: string) => void;
-  loadLive: (address: string, opts?: { silent?: boolean }) => Promise<void>;
+  loadLive: (
+    address: string,
+    opts?: { silent?: boolean; fullHistory?: boolean }
+  ) => Promise<void>;
   applyLayoutPositions: (
     positions: Record<string, { x: number; y: number; z: number }>
   ) => void;
@@ -89,6 +113,8 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   blockHeight: null,
   lastRefreshAt: null,
   autoRefresh: true,
+  fullHistory: false,
+  embedMode: false,
   rootLive: null,
   meta: null,
 
@@ -97,6 +123,33 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   setTimelineT: (t) => set({ timelineT: Math.min(1, Math.max(0, t)) }),
   setBlockHeight: (n) => set({ blockHeight: n }),
   setAutoRefresh: (v) => set({ autoRefresh: v }),
+  setEmbedMode: (v) => {
+    if (v) {
+      // Embeds never get full history
+      set({ embedMode: true, fullHistory: false });
+    } else {
+      set({ embedMode: false, fullHistory: readStoredFullTx() });
+    }
+  },
+  setFullHistory: (v) => {
+    if (get().embedMode) {
+      set({ fullHistory: false });
+      return;
+    }
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(FULL_TX_STORAGE_KEY, v ? "1" : "0");
+      }
+    } catch {
+      /* private mode */
+    }
+    set({ fullHistory: v });
+    // Re-scan current address with new mode
+    const q = get().query || get().graph?.root;
+    if (q && /^0x[a-f0-9]{40}$/i.test(q) && get().graph?.source !== "mock") {
+      void get().loadLive(q, { fullHistory: v });
+    }
+  },
 
   toggleNodeType: (t) => {
     const next = new Set(get().filters.nodeTypes);
@@ -149,11 +202,23 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     } else {
       set({ query: addr });
     }
+
+    const embed = get().embedMode;
+    const full =
+      !embed &&
+      (opts?.fullHistory !== undefined
+        ? opts.fullHistory
+        : get().fullHistory);
+
     try {
-      const res = await fetch(
-        `/api/graph?address=${encodeURIComponent(addr)}`,
-        { cache: "no-store", signal: ac.signal }
-      );
+      const qs = new URLSearchParams({ address: addr });
+      if (full) qs.set("full", "1");
+      if (embed) qs.set("embed", "1");
+
+      const res = await fetch(`/api/graph?${qs.toString()}`, {
+        cache: "no-store",
+        signal: ac.signal,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "fetch failed");
       const graph = data.graph as GraphData;
@@ -178,12 +243,13 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
               blocksScanned: data.meta.blocksScanned,
               persistentCount: data.meta.persistentCount,
               sovereignCount: data.meta.sovereignCount,
+              fullHistory: data.meta.fullHistory,
+              realTxCount: data.meta.realTxCount,
             }
           : null,
       });
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") return;
-      // Do not silently replace a good live graph with mock on refresh failure
       if (opts?.silent && get().graph?.source !== "mock") {
         set({
           error:
@@ -271,7 +337,6 @@ export function filterGraph(
     return true;
   });
 
-  // Depth limit (hops from root)
   const withinDepth = hopDistance(graph.root, edges, filters.depth);
   edges = edges.filter(
     (e) => withinDepth.has(e.source) && withinDepth.has(e.target)
@@ -282,7 +347,6 @@ export function filterGraph(
     nodeIds.add(e.source);
     nodeIds.add(e.target);
   }
-  // Include isolated root-only nodes within depth if no edges
   withinDepth.forEach((id) => nodeIds.add(id));
 
   const nodes = graph.nodes.filter((n) => {
@@ -299,11 +363,15 @@ export function filterGraph(
   const visible = new Set(nodes.map((n) => n.id));
   edges = edges.filter((e) => visible.has(e.source) && visible.has(e.target));
 
-  // Heartbeat spam: one arc per pair
+  // Heartbeat: collapse only when NOT full-history real txs (keep every real hash)
   const hbKey = new Map<string, GraphEdge>();
   const rest: GraphEdge[] = [];
   for (const e of edges) {
-    if (e.type === "heartbeat") {
+    const realTx =
+      e.txHash &&
+      /^0x[a-fA-F0-9]{64}$/.test(e.txHash) &&
+      !/^0x0+$/i.test(e.txHash);
+    if (e.type === "heartbeat" && !realTx) {
       const k = `${e.source}->${e.target}`;
       const prev = hbKey.get(k);
       if (!prev || e.timestamp > prev.timestamp) hbKey.set(k, e);
