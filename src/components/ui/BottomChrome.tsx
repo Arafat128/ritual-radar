@@ -18,7 +18,7 @@ const EDGE_CHIPS: { id: EdgeType; label: string; color: string }[] = [
   { id: "heartbeat", label: "Heartbeat", color: "#94a3b8" },
 ];
 
-export function BottomChrome() {
+export function BottomChrome({ compact = false }: { compact?: boolean }) {
   const filters = useGraphStore((s) => s.filters);
   const toggleNodeType = useGraphStore((s) => s.toggleNodeType);
   const toggleEdgeType = useGraphStore((s) => s.toggleEdgeType);
@@ -34,23 +34,33 @@ export function BottomChrome() {
   const mockEdges = graph?.edges.filter((e) => e.live === false).length ?? 0;
 
   return (
-    <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-20 p-3">
+    <div
+      className={`pointer-events-none absolute bottom-0 left-0 right-0 z-20 ${
+        compact ? "p-2" : "p-3"
+      }`}
+    >
       {error && (
         <p className="pointer-events-auto mb-2 rounded-lg border border-amber-400/30 bg-amber-950/60 px-3 py-1.5 text-[11px] text-amber-100">
           {error}
         </p>
       )}
-      {graph?.note && graph.source !== "mock" && (
+      {!compact && graph?.note && graph.source !== "mock" && (
         <p className="pointer-events-auto mb-2 max-w-3xl rounded-lg border border-cyan-400/20 bg-cyan-950/40 px-3 py-1.5 text-[11px] text-cyan-100/90">
           {graph.note}
         </p>
       )}
-      {graph?.source === "mock" && (
+      {!compact && graph?.source === "mock" && (
         <p className="pointer-events-auto mb-2 max-w-3xl rounded-lg border border-white/10 bg-black/50 px-3 py-1.5 text-[11px] text-white/55">
-          Demo mode — edges and peers are synthetic. Press <strong className="text-white/80">Scan</strong> on a real address for RPC + agent registry data.
+          Demo mode — edges and peers are synthetic. Press{" "}
+          <strong className="text-white/80">Scan</strong> on a real address for
+          RPC + agent registry data.
         </p>
       )}
-      <div className="glass-panel pointer-events-auto space-y-3 px-3 py-3">
+      <div
+        className={`glass-panel pointer-events-auto space-y-2 px-3 py-2 sm:space-y-3 sm:py-3 ${
+          compact ? "max-h-[38vh] overflow-y-auto" : ""
+        }`}
+      >
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-white/40">
           {graph && (
             <>

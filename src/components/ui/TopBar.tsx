@@ -31,7 +31,7 @@ function sourceBadge(
   };
 }
 
-export function TopBar() {
+export function TopBar({ compact = false }: { compact?: boolean }) {
   const query = useGraphStore((s) => s.query);
   const setQuery = useGraphStore((s) => s.setQuery);
   const loadLive = useGraphStore((s) => s.loadLive);
@@ -103,14 +103,24 @@ export function TopBar() {
       : null;
 
   return (
-    <header className="glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
+    <header
+      className={`glass-panel flex flex-wrap items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 sm:py-3 ${
+        compact ? "text-[11px]" : ""
+      }`}
+    >
       <div className="flex items-baseline gap-2">
-        <h1 className="font-display text-xl tracking-tight text-[#c8ff4a]">
+        <h1
+          className={`font-display tracking-tight text-[#c8ff4a] ${
+            compact ? "text-base" : "text-xl"
+          }`}
+        >
           Ritual Radar
         </h1>
-        <span className="hidden text-[10px] uppercase tracking-widest text-white/35 sm:inline">
-          3D relationship graph · chain 1979
-        </span>
+        {!compact && (
+          <span className="hidden text-[10px] uppercase tracking-widest text-white/35 sm:inline">
+            3D relationship graph · chain 1979
+          </span>
+        )}
       </div>
 
       <div className="flex min-w-[220px] flex-1 items-center gap-2">
@@ -148,14 +158,16 @@ export function TopBar() {
         >
           {loading ? "Scanning…" : "Scan"}
         </button>
-        <button
-          type="button"
-          onClick={() => loadMock(local || undefined)}
-          className="shrink-0 rounded-xl border border-white/15 px-3 py-2 text-xs text-white/60 hover:bg-white/5"
-          title="Offline demo graph — not chain data"
-        >
-          Demo
-        </button>
+        {!compact && (
+          <button
+            type="button"
+            onClick={() => loadMock(local || undefined)}
+            className="shrink-0 rounded-xl border border-white/15 px-3 py-2 text-xs text-white/60 hover:bg-white/5"
+            title="Offline demo graph — not chain data"
+          >
+            Demo
+          </button>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-white/45">

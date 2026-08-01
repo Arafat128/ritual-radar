@@ -6,6 +6,18 @@ Paste any **Ritual Chain** address (EOA, contract, Sovereign / Persistent agent)
 |--|--|
 | **Live** | [https://ritual-radar.vercel.app](https://ritual-radar.vercel.app) |
 | **GitHub** | [Arafat128/ritual-radar](https://github.com/Arafat128/ritual-radar) |
+| **Used by** | [Rite Research](https://rite-woad.vercel.app) (deep links + iframe embed) |
+
+### Deep links (for Rite & others)
+
+| Query | Effect |
+|-------|--------|
+| `?address=0x…` | Auto live scan of that address |
+| `?embed=1` | Compact chrome for iframe embed |
+| `?demo=1` | Open demo graph (`address` optional as root) |
+
+Example embed:  
+`https://ritual-radar.vercel.app/?address=0x50a3…&embed=1`
 
 > Not a clone of `agents.ritualfoundation.org` honeycomb roster. This tool traces **relationships and flow** for a specific address.
 
