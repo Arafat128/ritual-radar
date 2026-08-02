@@ -356,6 +356,8 @@ export async function buildLiveGraph(
   }
 
   // Agents owned by root (or owner matches)
+  // Correct topology: wallet --owns--> agent --heartbeat--> AgentHeartbeat
+  // Never draw wallet --heartbeat--> AgentHeartbeat (only agents pulse the registry).
   const ownedPersistent = persistent.filter(
     (x) => nodeId(x.info?.owner || "") === root
   );
@@ -386,7 +388,7 @@ export async function buildLiveGraph(
       txCount: persistentCount,
     });
     pushEdge(edges, edgeSeen, {
-      source: id,
+      source: id, // agent → heartbeat (not owner wallet)
       target: HEARTBEAT,
       type: "heartbeat",
       value: "0",
@@ -645,44 +647,21 @@ export async function buildLiveGraph(
     live: true,
   });
 
-  // If graph is sparse (and not mid full-history with hits only in list), hubs for orientation
-  const hasRealTxEdge = edges.some((e) => isRealTxHash(e.txHash));
-  if (!hasRealTxEdge && realTxHits === 0) {
-    const hubs = [
-      "0x532f0df0896f353d8c3dd8cc134e8129da2a3948",
-      "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b",
-      HEARTBEAT,
-    ] as const;
-    for (const hub of hubs) {
-      ensureNode(nodes, hub, {
-        type: PRECOMPILE_HINTS[hub] ? "precompile" : "contract",
-        label: labelFor(hub),
-        live: true,
-        txCount: 0,
-      });
-      pushEdge(edges, edgeSeen, {
-        source: root,
-        target: hub,
-        type: "call",
-        value: "0",
-        timestamp: Date.now(),
-        txHash: "0x" + "0".repeat(64),
-        live: true,
-      });
-    }
-  }
-
+  // Do NOT invent wallet→AgentHeartbeat / wallet→Scheduler edges.
+  // Heartbeat arcs only belong on persistent *agents* (added above when root is an agent).
+  // Sparse EOAs previously got fake hub edges when precompiles were toggled on — misleading.
   const realTxOrAgentEdges = edges.filter(
     (e) => e.live !== false && isRealTxHash(e.txHash)
   ).length;
+  const hasAnyLiveEdge = edges.length > 0;
 
   const note = fullHistory
     ? realTxHits > 0
       ? `Full tx mode: found ${realTxHits} interaction(s) in last ${blocksScanned} blocks. Each edge has an explorer tx link. Window is recent chain history (not forever) — explorer has no public full archive API.`
-      : `Full tx mode: scanned ${blocksScanned} blocks — no txs involving this address in that window. Agent registry links may still appear.`
-    : realTxOrAgentEdges > 0
+      : `Full tx mode: scanned ${blocksScanned} blocks — no txs involving this address in that window. Agent registry links may still appear. Heartbeat only appears for persistent TEE agents, not normal wallets.`
+    : hasAnyLiveEdge
       ? `Live graph: agent registry + last ${blocksScanned} blocks. Enable “Full tx history” on Ritual Radar for a deeper scan of every interaction with explorer links.`
-      : `Root is live from RPC. No recent txs in last ${blocksScanned} blocks — system hubs for orientation. Enable “Full tx history” on the Radar site for a deeper scan.`;
+      : `Root is live from RPC. No agent ownership links and no txs in the last ${blocksScanned} blocks — empty neighborhood (not fake hub links). Enable “Full tx history” for a deeper scan.`;
 
   const graph: GraphData = {
     root,
