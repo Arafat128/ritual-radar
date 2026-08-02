@@ -27,6 +27,60 @@ export const KNOWN_CONTRACTS: Record<string, string> = {
   "0xa568012b5c1be35fba52f91291237c82cf97e969": "GlyphOracle",
 };
 
+/**
+ * App contracts we probe on-chain for owner()/treasury()/admin().
+ * If root matches, we draw a real relationship edge (code-verified, not fake hubs).
+ * deployTx is optional explorer link when known (RPC may not retain old receipts).
+ */
+export type RoleProbe = "owner" | "treasury" | "admin";
+
+export type AppContractProbe = {
+  address: string;
+  label: string;
+  roles: RoleProbe[];
+  /** Optional known deploy tx (for explorer link) */
+  deployTx?: string;
+};
+
+export const APP_CONTRACT_PROBES: AppContractProbe[] = [
+  {
+    address: "0x70ef10629abc2b3d3fe1be850c093da2e2a5831e",
+    label: "OracleRoast",
+    roles: ["owner"],
+    deployTx:
+      "0xdd7190149165ebb99b12c2062dff4d6c444f4f3c88d25e6b38d03f306af368ef",
+  },
+  {
+    address: "0x31ee555dd23304421737c156f9a1cc353dacf015",
+    label: "VaultKeeper",
+    roles: ["owner"],
+    deployTx:
+      "0xdc0b89f419c980198dfa592878df5deb9abdac98ef9a318c43d68e68ebdb6bf6",
+  },
+  {
+    address: "0xa568012b5c1be35fba52f91291237c82cf97e969",
+    label: "GlyphOracle",
+    roles: ["owner"],
+    deployTx:
+      "0x817ebca8d8bd4a847e82d28a5e37590b0e6413ec0e73941767dd43bb291a0f83",
+  },
+  {
+    address: "0xd3469a23b2a08b237bc6c0522845eb1b508e5352",
+    label: "ResearchDesk (Rite)",
+    roles: ["owner", "treasury"],
+  },
+  {
+    address: "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f",
+    label: "RadarAgent (Rite)",
+    roles: ["treasury", "admin"],
+  },
+  {
+    address: "0xbc4bc83298950cbda52837cd806d41ad7c3c36bf",
+    label: "BountyPool (Rite)",
+    roles: ["owner"],
+  },
+];
+
 export const SYSTEM_HUBS = [
   "0xef505e801f1db392b5289690e2ffc20e840a3aca",
   "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b",

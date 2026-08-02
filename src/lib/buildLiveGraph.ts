@@ -4,6 +4,7 @@ import {
   http,
   type Address,
   type Hash,
+  type PublicClient,
   type Transaction,
 } from "viem";
 import type {
@@ -14,24 +15,51 @@ import type {
   GraphNode,
   NodeType,
 } from "@/lib/graphTypes";
-import { KNOWN_CONTRACTS } from "@/lib/knownContracts";
+import {
+  APP_CONTRACT_PROBES,
+  KNOWN_CONTRACTS,
+} from "@/lib/knownContracts";
 import { PRECOMPILE_HINTS, RPC_URL } from "@/lib/ritual";
 
 const HEARTBEAT = "0xef505e801f1db392b5289690e2ffc20e840a3aca";
 const AGENTS_CACHE =
   "https://explorer.ritualfoundation.org/api/agents/cache";
 
-/** Light scan (default) — fast neighborhood peek. */
-const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 48);
+/** Light scan (default). Ritual ~0.35s/block → 200 blocks ≈ 70s of chain time. */
+const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 200);
 /**
  * Full tx history (opt-in on Radar site only).
- * Ritual ~0.35s/block → 900 blocks ≈ 5 minutes of chain time.
+ * Still a recent window — not lifetime (RPC prunes old getBlock history).
  */
-const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 900);
+const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 1500);
 const SCAN_CONCURRENCY = 16;
 /** Cap graph edges for WebGL performance */
 const MAX_TX_EDGES = 150;
 const MAX_INTERACTIONS_LIST = 200;
+
+const ROLE_VIEW_ABI = [
+  {
+    type: "function",
+    name: "owner",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "treasury",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "admin",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+] as const;
 
 export type BuildLiveGraphOpts = {
   /**
@@ -178,7 +206,79 @@ function methodIdFromInput(input: unknown): string | undefined {
 }
 
 function isRealTxHash(h: string | undefined): boolean {
-  return Boolean(h && /^0x[a-fA-F0-9]{64}$/.test(h) && !/^0x0+$/i.test(h));
+  if (!h || !/^0x[a-fA-F0-9]{64}$/.test(h)) return false;
+  if (/^0x0+$/i.test(h)) return false;
+  // Reject synthetic padding (0xaaa…, 0xddd…) used for registry-inferred edges
+  if (/^0x([0-9a-f])\1{63}$/i.test(h)) return false;
+  return true;
+}
+
+/**
+ * Verify on-chain roles on known app contracts.
+ * If root is owner/treasury/admin, add a real relationship edge.
+ * This recovers connections when recent-block scan is empty but contracts still live
+ * (Ritual RPC does not retain full historical getBlock / getTransactionByHash).
+ */
+async function linkKnownAppRoles(
+  client: PublicClient,
+  root: string,
+  nodes: Map<string, GraphNode>,
+  edges: GraphEdge[],
+  edgeSeen: Set<string>
+): Promise<number> {
+  let linked = 0;
+  await mapPool(APP_CONTRACT_PROBES, 4, async (probe) => {
+    const addr = nodeId(probe.address);
+    try {
+      const code = await client.getBytecode({ address: addr as Address });
+      if (!code || code === "0x") return;
+
+      for (const role of probe.roles) {
+        let who: string | null = null;
+        try {
+          who = (await client.readContract({
+            address: addr as Address,
+            abi: ROLE_VIEW_ABI,
+            functionName: role,
+          })) as string;
+        } catch {
+          continue;
+        }
+        if (!who || nodeId(who) !== root) continue;
+
+        ensureNode(nodes, addr, {
+          type: "contract",
+          label: probe.label || KNOWN_CONTRACTS[addr] || "App contract",
+          live: true,
+          txCount: 1,
+        });
+
+        // owner/admin: wallet controls contract → wallet → contract
+        // treasury: fees flow to wallet → contract → wallet (fee sink)
+        const isTreasury = role === "treasury";
+        const source = isTreasury ? addr : root;
+        const target = isTreasury ? root : addr;
+        const edgeType = isTreasury ? "transfer" : "call";
+        const txHash = probe.deployTx || ("0x" + "0".repeat(64));
+
+        pushEdge(edges, edgeSeen, {
+          id: `role:${role}:${source}:${target}`,
+          source,
+          target,
+          type: edgeType,
+          value: "0",
+          timestamp: Date.now() - 1000,
+          txHash,
+          live: true,
+          methodId: role === "owner" ? "owner()" : role === "treasury" ? "treasury()" : "admin()",
+        });
+        linked++;
+      }
+    } catch {
+      /* skip probe */
+    }
+  });
+  return linked;
 }
 
 async function mapPool<T, R>(
@@ -474,9 +574,10 @@ export async function buildLiveGraph(
 
   // --- Block scan: light peek OR full interaction history (opt-in) ---
   let blocksScanned = 0;
+  // Light was wrongly capped at 96 — too short for Ritual's ~0.35s blocks
   const scanCap = fullHistory
-    ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 2000))
-    : Math.max(8, Math.min(BLOCK_SCAN_LIGHT, 96));
+    ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 2500))
+    : Math.max(48, Math.min(BLOCK_SCAN_LIGHT, 400));
   const blockIndexes = Array.from(
     { length: scanCap },
     (_, i) => blockHeight - i
@@ -542,13 +643,26 @@ export async function buildLiveGraph(
             direction,
           });
 
-          // Contract create: to is null — skip edge geometry, still list interaction
-          if (!to) continue;
+          // Contract create: to is null — resolve contractAddress from receipt
+          let peer = to;
+          if (!peer && from === root) {
+            try {
+              const receipt = await client.getTransactionReceipt({
+                hash: tx.hash as Hash,
+              });
+              if (receipt.contractAddress) {
+                peer = nodeId(receipt.contractAddress);
+              }
+            } catch {
+              /* receipt unavailable */
+            }
+          }
+          if (!peer) continue;
 
-          const peer = from === root ? to : from;
           let peerType: NodeType = "eoa";
           if (PRECOMPILE_HINTS[peer]) peerType = "precompile";
           else if (KNOWN_CONTRACTS[peer]) peerType = "contract";
+          else if (!to) peerType = "contract"; // freshly created
           if (
             persistent.some(
               (p) =>
@@ -564,7 +678,7 @@ export async function buildLiveGraph(
 
           ensureNode(nodes, peer, {
             type: peerType,
-            label: labelFor(peer),
+            label: labelFor(peer, !to ? "Deployed contract" : undefined),
             live: true,
             lastSeen: bn,
             txCount: 1,
@@ -575,14 +689,14 @@ export async function buildLiveGraph(
             edgeSeen,
             {
               source: from,
-              target: to,
+              target: peer,
               type: edgeType,
               value: value.toString(),
               timestamp: ts,
               txHash: tx.hash,
               live: true,
               blockNumber: bn,
-              methodId,
+              methodId: methodId || (!to ? "CREATE" : undefined),
             },
             { allowSelf: false }
           );
@@ -594,6 +708,21 @@ export async function buildLiveGraph(
     }
   } catch {
     /* scan best-effort */
+  }
+
+  // --- Code-verified app roles (owner / treasury / admin) ---
+  // Critical for EOAs with historical deploys but no recent blocks (treasury, etc.)
+  let roleLinks = 0;
+  try {
+    roleLinks = await linkKnownAppRoles(
+      client,
+      root,
+      nodes,
+      edges,
+      edgeSeen
+    );
+  } catch {
+    /* optional */
   }
 
   // Newest first; cap for UI + renderer
@@ -648,20 +777,47 @@ export async function buildLiveGraph(
   });
 
   // Do NOT invent wallet→AgentHeartbeat / wallet→Scheduler edges.
-  // Heartbeat arcs only belong on persistent *agents* (added above when root is an agent).
-  // Sparse EOAs previously got fake hub edges when precompiles were toggled on — misleading.
-  const realTxOrAgentEdges = edges.filter(
+  // Heartbeat only for persistent agents. Connections for EOAs come from:
+  // recent txs + code-verified owner()/treasury()/admin() on known apps.
+  const realTxEdgeCount = edges.filter(
     (e) => e.live !== false && isRealTxHash(e.txHash)
   ).length;
   const hasAnyLiveEdge = edges.length > 0;
+  const nonceNum = Number(nonce);
 
-  const note = fullHistory
-    ? realTxHits > 0
-      ? `Full tx mode: found ${realTxHits} interaction(s) in last ${blocksScanned} blocks. Each edge has an explorer tx link. Window is recent chain history (not forever) — explorer has no public full archive API.`
-      : `Full tx mode: scanned ${blocksScanned} blocks — no txs involving this address in that window. Agent registry links may still appear. Heartbeat only appears for persistent TEE agents, not normal wallets.`
-    : hasAnyLiveEdge
-      ? `Live graph: agent registry + last ${blocksScanned} blocks. Enable “Full tx history” on Ritual Radar for a deeper scan of every interaction with explorer links.`
-      : `Root is live from RPC. No agent ownership links and no txs in the last ${blocksScanned} blocks — empty neighborhood (not fake hub links). Enable “Full tx history” for a deeper scan.`;
+  const noteParts: string[] = [];
+  if (realTxHits > 0) {
+    noteParts.push(
+      `Found ${realTxHits} recent tx(s) in last ${blocksScanned} blocks.`
+    );
+  } else {
+    noteParts.push(
+      `No txs in last ${blocksScanned} blocks (~${Math.max(
+        1,
+        Math.round((blocksScanned * 0.35) / 60)
+      )} min of chain time).`
+    );
+  }
+  if (roleLinks > 0) {
+    noteParts.push(
+      `${roleLinks} code-verified role link(s) via owner()/treasury()/admin() on known app contracts.`
+    );
+  }
+  if (nonceNum > 0 && realTxHits === 0) {
+    noteParts.push(
+      `Nonce is ${nonceNum} (historical activity exists); Ritual RPC cannot serve lifetime tx history — role links recover live ownership.`
+    );
+  }
+  if (!hasAnyLiveEdge) {
+    noteParts.push(
+      "Empty neighborhood for this window (no fake hubs). Full tx digs more recent blocks; lifetime needs indexer/paid dig."
+    );
+  } else if (!fullHistory) {
+    noteParts.push("Enable Full tx on the Radar site for a deeper recent-block scan.");
+  }
+  noteParts.push(
+    "Heartbeat edges only for persistent agents to AgentHeartbeat, never bare EOAs."
+  );
 
   const graph: GraphData = {
     root,
@@ -669,8 +825,8 @@ export async function buildLiveGraph(
     edges,
     blockHeight,
     fetchedAt: new Date().toISOString(),
-    source: realTxHits > 0 || realTxOrAgentEdges > 0 ? "live" : "live_partial",
-    note,
+    source: hasAnyLiveEdge ? "live" : "live_partial",
+    note: noteParts.join(" "),
     fullHistory,
     interactions: fullHistory ? interactionsCapped : undefined,
   };
@@ -684,14 +840,14 @@ export async function buildLiveGraph(
       balance: balance.toString(),
       balanceRit: formatEther(balance),
       hasCode,
-      txCount: Number(nonce),
+      txCount: nonceNum,
     },
     meta: {
       agentCacheOk,
       persistentCount,
       sovereignCount,
       blocksScanned,
-      liveEdges: realTxOrAgentEdges,
+      liveEdges: realTxEdgeCount + roleLinks,
       scanWindowBlocks: scanCap,
       fullHistory,
       realTxCount: realTxHits,
