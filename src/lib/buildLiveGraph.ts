@@ -213,11 +213,90 @@ function isRealTxHash(h: string | undefined): boolean {
   return true;
 }
 
+function roleMethodId(role: "owner" | "treasury" | "admin"): string {
+  if (role === "owner") return "owner()";
+  if (role === "treasury") return "treasury()";
+  return "admin()";
+}
+
 /**
- * Verify on-chain roles on known app contracts.
- * If root is owner/treasury/admin, add a real relationship edge.
- * This recovers connections when recent-block scan is empty but contracts still live
- * (Ritual RPC does not retain full historical getBlock / getTransactionByHash).
+ * Draw one role edge (idempotent via edgeSeen).
+ * - owner/admin: controller → contract
+ * - treasury: contract → fee recipient
+ */
+function pushRoleEdge(
+  edges: GraphEdge[],
+  edgeSeen: Set<string>,
+  nodes: Map<string, GraphNode>,
+  opts: {
+    role: "owner" | "treasury" | "admin";
+    contract: string;
+    who: string;
+    contractLabel?: string;
+    whoLabel?: string;
+    deployTx?: string;
+  }
+): boolean {
+  const contract = nodeId(opts.contract);
+  const who = nodeId(opts.who);
+  if (!contract || !who || contract === who) return false;
+  if (who === "0x0000000000000000000000000000000000000000") return false;
+
+  ensureNode(nodes, contract, {
+    type: "contract",
+    label: opts.contractLabel || KNOWN_CONTRACTS[contract] || "Contract",
+    live: true,
+    txCount: 1,
+  });
+  ensureNode(nodes, who, {
+    type: "eoa",
+    label: opts.whoLabel || labelFor(who, "Account"),
+    live: true,
+    txCount: 0,
+  });
+
+  const isTreasury = opts.role === "treasury";
+  const source = isTreasury ? contract : who;
+  const target = isTreasury ? who : contract;
+  const before = edgeSeen.size;
+  pushEdge(edges, edgeSeen, {
+    id: `role:${opts.role}:${source}:${target}`,
+    source,
+    target,
+    type: isTreasury ? "transfer" : "call",
+    value: "0",
+    timestamp: Date.now() - 1000,
+    txHash: opts.deployTx || ("0x" + "0".repeat(64)),
+    live: true,
+    methodId: roleMethodId(opts.role),
+  });
+  return edgeSeen.size > before;
+}
+
+async function readRole(
+  client: PublicClient,
+  address: Address,
+  role: "owner" | "treasury" | "admin"
+): Promise<string | null> {
+  try {
+    return (await client.readContract({
+      address,
+      abi: ROLE_VIEW_ABI,
+      functionName: role,
+    })) as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Code-verified relationship recovery (no fake hubs):
+ * 1) Root is owner/treasury/admin of a known app → link root to that app
+ * 2) Root IS a known app → link out to its owner/treasury/admin
+ * 3) Root has bytecode (any contract) → try Ownable-style owner/treasury/admin
+ * 4) Sibling known apps that share the same owner (capped)
+ *
+ * Fixes Rite "Radar · pool" opening BountyPool with zero edges (owner is treasury, not the pool).
  */
 async function linkKnownAppRoles(
   client: PublicClient,
@@ -227,6 +306,9 @@ async function linkKnownAppRoles(
   edgeSeen: Set<string>
 ): Promise<number> {
   let linked = 0;
+  const rootAddr = root as Address;
+
+  // --- Pass 1: known app catalog (both directions) ---
   await mapPool(APP_CONTRACT_PROBES, 4, async (probe) => {
     const addr = nodeId(probe.address);
     try {
@@ -234,50 +316,128 @@ async function linkKnownAppRoles(
       if (!code || code === "0x") return;
 
       for (const role of probe.roles) {
-        let who: string | null = null;
-        try {
-          who = (await client.readContract({
-            address: addr as Address,
-            abi: ROLE_VIEW_ABI,
-            functionName: role,
-          })) as string;
-        } catch {
-          continue;
+        const who = await readRole(client, addr as Address, role);
+        if (!who) continue;
+        const whoId = nodeId(who);
+
+        // Direction A: scanning the wallet that owns / is treasury of this app
+        if (whoId === root) {
+          if (
+            pushRoleEdge(edges, edgeSeen, nodes, {
+              role,
+              contract: addr,
+              who: root,
+              contractLabel: probe.label,
+              whoLabel: labelFor(root, "Account"),
+              deployTx: probe.deployTx,
+            })
+          ) {
+            linked++;
+          }
         }
-        if (!who || nodeId(who) !== root) continue;
 
-        ensureNode(nodes, addr, {
-          type: "contract",
-          label: probe.label || KNOWN_CONTRACTS[addr] || "App contract",
-          live: true,
-          txCount: 1,
-        });
-
-        // owner/admin: wallet controls contract → wallet → contract
-        // treasury: fees flow to wallet → contract → wallet (fee sink)
-        const isTreasury = role === "treasury";
-        const source = isTreasury ? addr : root;
-        const target = isTreasury ? root : addr;
-        const edgeType = isTreasury ? "transfer" : "call";
-        const txHash = probe.deployTx || ("0x" + "0".repeat(64));
-
-        pushEdge(edges, edgeSeen, {
-          id: `role:${role}:${source}:${target}`,
-          source,
-          target,
-          type: edgeType,
-          value: "0",
-          timestamp: Date.now() - 1000,
-          txHash,
-          live: true,
-          methodId: role === "owner" ? "owner()" : role === "treasury" ? "treasury()" : "admin()",
-        });
-        linked++;
+        // Direction B: scanning the app contract itself → show its owner/treasury
+        if (addr === root && whoId !== root) {
+          if (
+            pushRoleEdge(edges, edgeSeen, nodes, {
+              role,
+              contract: root,
+              who: whoId,
+              contractLabel: probe.label || labelFor(root),
+              whoLabel:
+                role === "owner"
+                  ? "Owner"
+                  : role === "treasury"
+                    ? "Treasury"
+                    : "Admin",
+              deployTx: probe.deployTx,
+            })
+          ) {
+            linked++;
+          }
+        }
       }
     } catch {
       /* skip probe */
     }
   });
+
+  // --- Pass 2: generic Ownable on root if it is a contract and still sparse ---
+  // Helps unknown apps without harming EOAs (no code → skip).
+  try {
+    const rootCode = await client.getBytecode({ address: rootAddr });
+    if (rootCode && rootCode !== "0x") {
+      for (const role of ["owner", "treasury", "admin"] as const) {
+        const who = await readRole(client, rootAddr, role);
+        if (!who || nodeId(who) === root) continue;
+        if (
+          pushRoleEdge(edges, edgeSeen, nodes, {
+            role,
+            contract: root,
+            who,
+            contractLabel: labelFor(root, "Contract"),
+            whoLabel:
+              role === "owner"
+                ? "Owner"
+                : role === "treasury"
+                  ? "Treasury"
+                  : "Admin",
+          })
+        ) {
+          linked++;
+        }
+      }
+    }
+  } catch {
+    /* optional */
+  }
+
+  // --- Pass 3: sibling known apps under same owner (only if we know an owner peer) ---
+  // Keeps graphs useful for Rite contracts without inventing heartbeat/system hubs.
+  try {
+    let ownerOfRoot: string | null = null;
+    const rootCode = await client.getBytecode({ address: rootAddr });
+    if (rootCode && rootCode !== "0x") {
+      ownerOfRoot = await readRole(client, rootAddr, "owner");
+    }
+    // Or root itself is an owner wallet: use root as the shared owner key
+    const sharedOwner = ownerOfRoot ? nodeId(ownerOfRoot) : root;
+
+    if (sharedOwner) {
+      await mapPool(APP_CONTRACT_PROBES, 4, async (probe) => {
+        const addr = nodeId(probe.address);
+        if (addr === root) return;
+        try {
+          const code = await client.getBytecode({ address: addr as Address });
+          if (!code || code === "0x") return;
+          const who = await readRole(client, addr as Address, "owner");
+          if (!who || nodeId(who) !== sharedOwner) return;
+          // Only attach siblings when root is that owner OR root is another app of same owner
+          const rootIsOwner = sharedOwner === root;
+          const rootIsSiblingApp = Boolean(ownerOfRoot);
+          if (!rootIsOwner && !rootIsSiblingApp) return;
+
+          if (
+            pushRoleEdge(edges, edgeSeen, nodes, {
+              role: "owner",
+              contract: addr,
+              who: sharedOwner,
+              contractLabel: probe.label,
+              whoLabel: rootIsOwner ? labelFor(root, "Owner") : "Shared owner",
+              deployTx: probe.deployTx,
+            })
+          ) {
+            linked++;
+          }
+        } catch {
+          /* skip */
+        }
+      });
+    }
+  } catch {
+    /* optional */
+  }
+
   return linked;
 }
 
