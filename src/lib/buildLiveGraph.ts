@@ -854,13 +854,24 @@ export async function buildLiveGraph(
 
   // --- Block scan: light peek OR full interaction history (opt-in) ---
   let blocksScanned = 0;
-  // Light was wrongly capped at 96 — too short for Ritual's ~0.35s blocks
-  const scanCap =
-    blockHeight <= 0
-      ? 0
-      : fullHistory
-        ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 700))
-        : Math.max(60, Math.min(BLOCK_SCAN_LIGHT, 240));
+  /**
+   * Adaptive light window: high-nonce EOAs with no activity in the last
+   * ~minute still need a deeper look (e.g. 0xf172… had txs ~200–600 back).
+   * Full mode uses the larger opt-in window.
+   */
+  let scanCap = 0;
+  if (blockHeight > 0) {
+    if (fullHistory) {
+      scanCap = Math.max(120, Math.min(BLOCK_SCAN_FULL, 700));
+    } else {
+      const base = Math.max(60, Math.min(BLOCK_SCAN_LIGHT, 240));
+      // Nonce > 0 → extend so "no connections" is less often a short-window miss
+      scanCap =
+        Number(nonce) > 0
+          ? Math.max(base, Math.min(520, base + 320))
+          : base;
+    }
+  }
   const blockIndexes = Array.from(
     { length: scanCap },
     (_, i) => blockHeight - i
@@ -1011,11 +1022,12 @@ export async function buildLiveGraph(
       }
 
       // Early stop light mode once we have a useful neighborhood
-      if (!fullHistory && realTxHits >= 24) {
+      // (avoid scanning the full adaptive window after first hits)
+      if (!fullHistory && realTxHits >= 6) {
         const hasNonEoa = Array.from(nodes.values()).some(
           (n) => n.id !== root && n.type !== "eoa"
         );
-        if (hasNonEoa || realTxHits >= 48) break;
+        if (hasNonEoa || realTxHits >= 20) break;
       }
       // Brief pause between chunks so public RPC can recover
       if (off + chunkSize < blockIndexes.length && !rateLimited) {
