@@ -77,7 +77,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
     };
   }, [setBlockHeight]);
 
-  // Auto-refresh live graph
+  // Auto-refresh (optional) — slow interval to respect public RPC rate limits
   const graphRoot = graph?.root;
   const graphSource = graph?.source;
   useEffect(() => {
@@ -86,7 +86,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
     if (!isAddr(graphRoot)) return;
     const t = setInterval(() => {
       void loadLive(graphRoot, { silent: true });
-    }, 28_000);
+    }, 90_000);
     return () => clearInterval(t);
   }, [autoRefresh, graphRoot, graphSource, loadLive]);
 

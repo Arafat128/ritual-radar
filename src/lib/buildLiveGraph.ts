@@ -24,24 +24,37 @@ import {
   PRECOMPILE_HINTS,
   RPC_URL,
 } from "@/lib/ritual";
+import {
+  cacheGetCode,
+  cacheSetCode,
+  throttledRpc,
+} from "@/lib/rpcThrottle";
 
 const HEARTBEAT = "0xef505e801f1db392b5289690e2ffc20e840a3aca";
 const AGENTS_CACHE =
   "https://explorer.ritualfoundation.org/api/agents/cache";
 
-/** Light scan (default). Ritual ~0.35s/block → 600 blocks ≈ 3.5 min of chain time. */
-const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 600);
 /**
- * Full tx history (opt-in on Radar site only).
- * Still a recent window — not lifetime (RPC prunes old getBlock history).
+ * Light scan — coverage vs public RPC budget.
+ * Ritual ~0.2–0.35s/block → 200 blocks ≈ 40–70s of chain time.
  */
-const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 2500);
-const SCAN_CONCURRENCY = 16;
+const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 200);
+/**
+ * Full tx history (opt-in). Keep modest to avoid 429 on public RPC.
+ */
+const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 600);
+/** Parallel getBlock calls — high values cause 429 on ritualfoundation.org */
+const SCAN_CONCURRENCY = 3;
 /** Cap graph edges for WebGL performance */
-const MAX_TX_EDGES = 180;
-const MAX_INTERACTIONS_LIST = 220;
-/** Classify this many peers with getBytecode (was 14 — caused "EOA-only" graphs) */
-const PEER_CODE_ENRICH_CAP = 80;
+const MAX_TX_EDGES = 160;
+const MAX_INTERACTIONS_LIST = 200;
+/**
+ * Only unknown peers need getBytecode. Known/precompile skip RPC.
+ * Keep low to avoid 429 (each peer = 1–2 eth_calls).
+ */
+const PEER_CODE_ENRICH_CAP = 12;
+/** Max getBalance calls for peers (UI polish only) */
+const PEER_BALANCE_CAP = 8;
 
 const ROLE_VIEW_ABI = [
   {
@@ -285,11 +298,57 @@ async function readRole(
   role: "owner" | "treasury" | "admin"
 ): Promise<string | null> {
   try {
-    return (await client.readContract({
-      address,
-      abi: ROLE_VIEW_ABI,
-      functionName: role,
-    })) as string;
+    return (await throttledRpc(() =>
+      client.readContract({
+        address,
+        abi: ROLE_VIEW_ABI,
+        functionName: role,
+      })
+    )) as string;
+  } catch {
+    return null;
+  }
+}
+
+async function safeGetBytecode(
+  client: PublicClient,
+  address: Address
+): Promise<string | null> {
+  const key = nodeId(address);
+  // Precompiles / known — never eth_getCode
+  if (isPrecompileAddress(key)) {
+    cacheSetCode(key, "0x");
+    return "0x";
+  }
+  if (KNOWN_CONTRACTS[key] || PRECOMPILE_HINTS[key]) {
+    // Treat catalog entries as contracts without getCode
+    cacheSetCode(key, "0x01");
+    return "0x01";
+  }
+  const cached = cacheGetCode(key);
+  if (cached !== undefined) return cached;
+
+  try {
+    const code = await throttledRpc(() =>
+      client.getBytecode({ address })
+    );
+    const norm = code && code !== "0x" ? code : "0x";
+    cacheSetCode(key, norm);
+    return norm;
+  } catch {
+    // On 429 / RPC fail — leave uncached so a later retry can fill
+    return null;
+  }
+}
+
+async function safeGetBalance(
+  client: PublicClient,
+  address: Address
+): Promise<bigint | null> {
+  try {
+    return await throttledRpc(() =>
+      client.getBalance({ address })
+    );
   } catch {
     return null;
   }
@@ -315,10 +374,10 @@ async function linkKnownAppRoles(
   const rootAddr = root as Address;
 
   // --- Pass 1: known app catalog (both directions) ---
-  await mapPool(APP_CONTRACT_PROBES, 4, async (probe) => {
+  await mapPool(APP_CONTRACT_PROBES, 2, async (probe) => {
     const addr = nodeId(probe.address);
     try {
-      const code = await client.getBytecode({ address: addr as Address });
+      const code = await safeGetBytecode(client, addr as Address);
       if (!code || code === "0x") return;
 
       for (const role of probe.roles) {
@@ -371,7 +430,7 @@ async function linkKnownAppRoles(
   // --- Pass 2: generic Ownable on root if it is a contract and still sparse ---
   // Helps unknown apps without harming EOAs (no code → skip).
   try {
-    const rootCode = await client.getBytecode({ address: rootAddr });
+    const rootCode = await safeGetBytecode(client, rootAddr);
     if (rootCode && rootCode !== "0x") {
       for (const role of ["owner", "treasury", "admin"] as const) {
         const who = await readRole(client, rootAddr, role);
@@ -402,7 +461,7 @@ async function linkKnownAppRoles(
   // Keeps graphs useful for Rite contracts without inventing heartbeat/system hubs.
   try {
     let ownerOfRoot: string | null = null;
-    const rootCode = await client.getBytecode({ address: rootAddr });
+    const rootCode = await safeGetBytecode(client, rootAddr);
     if (rootCode && rootCode !== "0x") {
       ownerOfRoot = await readRole(client, rootAddr, "owner");
     }
@@ -410,11 +469,11 @@ async function linkKnownAppRoles(
     const sharedOwner = ownerOfRoot ? nodeId(ownerOfRoot) : root;
 
     if (sharedOwner) {
-      await mapPool(APP_CONTRACT_PROBES, 4, async (probe) => {
+      await mapPool(APP_CONTRACT_PROBES, 2, async (probe) => {
         const addr = nodeId(probe.address);
         if (addr === root) return;
         try {
-          const code = await client.getBytecode({ address: addr as Address });
+          const code = await safeGetBytecode(client, addr as Address);
           if (!code || code === "0x") return;
           const who = await readRole(client, addr as Address, "owner");
           if (!who || nodeId(who) !== sharedOwner) return;
@@ -501,39 +560,77 @@ export async function buildLiveGraph(
 ): Promise<LiveGraphResult> {
   const fullHistory = Boolean(opts.fullHistory);
   const root = nodeId(rootInput);
+  // Low retryCount — our throttle handles 429; high retries amplify rate limits
   const client = createPublicClient({
     transport: http(RPC_URL, {
-      timeout: fullHistory ? 25_000 : 18_000,
-      retryCount: 3,
-      retryDelay: 350,
+      timeout: fullHistory ? 22_000 : 16_000,
+      retryCount: 1,
+      retryDelay: 800,
     }),
   });
 
-  const [blockNumber, balance, code, nonce] = await Promise.all([
-    client.getBlockNumber(),
-    client.getBalance({ address: root as Address }),
-    client.getBytecode({ address: root as Address }),
-    client.getTransactionCount({ address: root as Address }),
-  ]);
+  // Sequential root probes with throttle — parallel bursts cause 429 on root getCode
+  let blockHeight = 0;
+  let balance = BigInt(0);
+  let code: string | null = "0x";
+  let nonce = 0;
+  try {
+    blockHeight = Number(
+      await throttledRpc(() => client.getBlockNumber())
+    );
+  } catch {
+    /* continue with partial */
+  }
+  try {
+    balance =
+      (await safeGetBalance(client, root as Address)) ?? BigInt(0);
+  } catch {
+    /* */
+  }
+  try {
+    code = await safeGetBytecode(client, root as Address);
+  } catch {
+    code = "0x";
+  }
+  try {
+    nonce = Number(
+      await throttledRpc(() =>
+        client.getTransactionCount({ address: root as Address })
+      )
+    );
+  } catch {
+    nonce = 0;
+  }
 
-  const blockHeight = Number(blockNumber);
-  const hasCode = Boolean(code && code !== "0x");
+  const hasCode = Boolean(code && code !== "0x" && code !== "0x01");
+  // known catalog root is contract even if we skipped getCode
+  const hasCodeOrKnown =
+    hasCode || Boolean(KNOWN_CONTRACTS[root] || PRECOMPILE_HINTS[root]);
   const nodes = new Map<string, GraphNode>();
   const edges: GraphEdge[] = [];
   const edgeSeen = new Set<string>();
 
-  let rootType: NodeType = hasCode ? "contract" : "eoa";
+  let rootType: NodeType = hasCodeOrKnown
+    ? isPrecompileAddress(root)
+      ? "precompile"
+      : "contract"
+    : "eoa";
   let agentStatus: AgentStatus | undefined;
-  let rootLabel = labelFor(root, hasCode ? "Contract" : "EOA");
+  let rootLabel = labelFor(
+    root,
+    rootType === "contract"
+      ? "Contract"
+      : rootType === "precompile"
+        ? "Precompile"
+        : "EOA"
+  );
 
-  if (PRECOMPILE_HINTS[root] || root.startsWith("0x0000000000000000000000000000000000000")) {
-    if (PRECOMPILE_HINTS[root] || KNOWN_CONTRACTS[root]) {
-      rootType = PRECOMPILE_HINTS[root] ? "precompile" : rootType;
-    }
-  }
-  if (PRECOMPILE_HINTS[root]) {
+  if (isPrecompileAddress(root) || PRECOMPILE_HINTS[root]?.includes("precompile")) {
     rootType = "precompile";
-    rootLabel = PRECOMPILE_HINTS[root];
+    rootLabel = PRECOMPILE_HINTS[root] || rootLabel;
+  } else if (PRECOMPILE_HINTS[root] || KNOWN_CONTRACTS[root]) {
+    rootType = "contract";
+    rootLabel = PRECOMPILE_HINTS[root] || KNOWN_CONTRACTS[root] || rootLabel;
   }
 
   // --- Agent cache (real relationships) ---
@@ -758,9 +855,12 @@ export async function buildLiveGraph(
   // --- Block scan: light peek OR full interaction history (opt-in) ---
   let blocksScanned = 0;
   // Light was wrongly capped at 96 — too short for Ritual's ~0.35s blocks
-  const scanCap = fullHistory
-    ? Math.max(200, Math.min(BLOCK_SCAN_FULL, 3000))
-    : Math.max(120, Math.min(BLOCK_SCAN_LIGHT, 900));
+  const scanCap =
+    blockHeight <= 0
+      ? 0
+      : fullHistory
+        ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 700))
+        : Math.max(60, Math.min(BLOCK_SCAN_LIGHT, 240));
   const blockIndexes = Array.from(
     { length: scanCap },
     (_, i) => blockHeight - i
@@ -768,19 +868,32 @@ export async function buildLiveGraph(
 
   const interactions: GraphInteraction[] = [];
   let realTxHits = 0;
+  let rateLimited = false;
 
   try {
-    // Chunked pools so full history stays within serverless time budget
-    const chunkSize = fullHistory ? 120 : scanCap;
+    // Smaller chunks + lower concurrency = fewer 429s
+    const chunkSize = fullHistory ? 24 : 30;
     for (let off = 0; off < blockIndexes.length; off += chunkSize) {
+      if (rateLimited) break;
       const slice = blockIndexes.slice(off, off + chunkSize);
       const blocks = await mapPool(slice, SCAN_CONCURRENCY, async (n) => {
+        if (rateLimited) return null;
         try {
-          return await client.getBlock({
-            blockNumber: BigInt(n),
-            includeTransactions: true,
-          });
-        } catch {
+          return await throttledRpc(() =>
+            client.getBlock({
+              blockNumber: BigInt(n),
+              includeTransactions: true,
+            })
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (
+            msg.includes("429") ||
+            /too many requests/i.test(msg) ||
+            /rate limit/i.test(msg)
+          ) {
+            rateLimited = true;
+          }
           return null;
         }
       });
@@ -826,14 +939,16 @@ export async function buildLiveGraph(
             direction,
           });
 
-          // Contract create: to is null — resolve contractAddress from receipt
+          // Contract create: to is null — only fetch receipt rarely (extra RPC)
           let peer = to;
           let created = false;
-          if (!peer && from === root) {
+          if (!peer && from === root && realTxHits <= 8) {
             try {
-              const receipt = await client.getTransactionReceipt({
-                hash: tx.hash as Hash,
-              });
+              const receipt = await throttledRpc(() =>
+                client.getTransactionReceipt({
+                  hash: tx.hash as Hash,
+                })
+              );
               if (receipt.contractAddress) {
                 peer = nodeId(receipt.contractAddress);
                 created = true;
@@ -895,13 +1010,16 @@ export async function buildLiveGraph(
         }
       }
 
-      // Early stop light mode only after enough hits AND we already have
-      // some non-EOA peers (or hit cap) — avoids stopping on pure EOA spam.
-      if (!fullHistory && realTxHits >= 40) {
+      // Early stop light mode once we have a useful neighborhood
+      if (!fullHistory && realTxHits >= 24) {
         const hasNonEoa = Array.from(nodes.values()).some(
           (n) => n.id !== root && n.type !== "eoa"
         );
-        if (hasNonEoa || realTxHits >= 80) break;
+        if (hasNonEoa || realTxHits >= 48) break;
+      }
+      // Brief pause between chunks so public RPC can recover
+      if (off + chunkSize < blockIndexes.length && !rateLimited) {
+        await new Promise((r) => setTimeout(r, fullHistory ? 120 : 80));
       }
     }
   } catch {
@@ -910,17 +1028,20 @@ export async function buildLiveGraph(
 
   // --- Code-verified app roles (owner / treasury / admin) ---
   // Critical for EOAs with historical deploys but no recent blocks (treasury, etc.)
+  // Skip when already rate-limited — agent cache + partial txs are enough.
   let roleLinks = 0;
-  try {
-    roleLinks = await linkKnownAppRoles(
-      client,
-      root,
-      nodes,
-      edges,
-      edgeSeen
-    );
-  } catch {
-    /* optional */
+  if (!rateLimited) {
+    try {
+      roleLinks = await linkKnownAppRoles(
+        client,
+        root,
+        nodes,
+        edges,
+        edgeSeen
+      );
+    } catch {
+      /* optional */
+    }
   }
 
   // Newest first; cap for UI + renderer
@@ -935,82 +1056,94 @@ export async function buildLiveGraph(
   edges.length = 0;
   edges.push(...trimmedReal, ...otherEdges);
 
-  // Classify peers with getBytecode — prioritize high-degree / recent peers.
-  // BUGFIX: previously only first 14 Map keys were checked, so most contracts
-  // stayed typed as "eoa" (user saw "only EOAs" for busy wallets).
-  const peersRanked = Array.from(nodes.values())
-    .filter((n) => n.id !== root)
-    .sort((a, b) => {
-      // Prefer unknowns that look like they need classification
-      const aNeed = a.type === "eoa" ? 1 : 0;
-      const bNeed = b.type === "eoa" ? 1 : 0;
-      if (aNeed !== bNeed) return bNeed - aNeed;
-      return (b.txCount || 0) - (a.txCount || 0) || (b.lastSeen || 0) - (a.lastSeen || 0);
-    })
-    .slice(0, PEER_CODE_ENRICH_CAP)
-    .map((n) => n.id);
-
-  await mapPool(peersRanked, 10, async (id) => {
-    try {
-      const n = nodes.get(id);
-      if (!n) return;
-
-      // Preserve agent types; force precompile range
-      if (n.type === "persistent_agent" || n.type === "sovereign_agent") {
-        const bal = await client.getBalance({ address: id as Address });
-        ensureNode(nodes, id, {
-          type: n.type,
-          balance: bal.toString(),
-          label: n.label,
-          live: true,
-          txCount: n.txCount,
-          lastSeen: n.lastSeen,
-          agentStatus: n.agentStatus,
-        });
-        return;
-      }
-
-      if (isPrecompileAddress(id)) {
-        const bal = await client.getBalance({ address: id as Address });
-        ensureNode(nodes, id, {
-          type: "precompile",
-          balance: bal.toString(),
-          label: PRECOMPILE_HINTS[id] || labelFor(id, "Precompile"),
-          live: true,
-          txCount: n.txCount,
-          lastSeen: n.lastSeen,
-        });
-        return;
-      }
-
-      const [bal, code] = await Promise.all([
-        client.getBalance({ address: id as Address }),
-        client.getBytecode({ address: id as Address }),
-      ]);
-      const isCode = Boolean(code && code !== "0x");
-      let type: NodeType = "eoa";
-      if (KNOWN_CONTRACTS[id] || PRECOMPILE_HINTS[id] || isCode) {
-        type = "contract";
-      }
-
-      ensureNode(nodes, id, {
-        type,
-        balance: bal.toString(),
+  // --- Peer typing (minimal RPC) ---
+  // 1) Instant: precompile range + catalogs (no eth_getCode)
+  // 2) Only unknown EOAs get bytecode, capped + throttled
+  for (const n of Array.from(nodes.values())) {
+    if (n.id === root) continue;
+    if (isPrecompileAddress(n.id)) {
+      ensureNode(nodes, n.id, {
+        type: "precompile",
+        label: PRECOMPILE_HINTS[n.id] || labelFor(n.id, "Precompile"),
+        live: true,
+        txCount: n.txCount,
+        lastSeen: n.lastSeen,
+      });
+    } else if (KNOWN_CONTRACTS[n.id] || PRECOMPILE_HINTS[n.id]) {
+      ensureNode(nodes, n.id, {
+        type:
+          n.type === "persistent_agent" || n.type === "sovereign_agent"
+            ? n.type
+            : "contract",
         label:
           n.label ||
-          labelFor(
-            id,
-            type === "contract" ? "Contract" : "EOA"
-          ),
+          KNOWN_CONTRACTS[n.id] ||
+          PRECOMPILE_HINTS[n.id] ||
+          "Contract",
+        live: true,
+        txCount: n.txCount,
+        lastSeen: n.lastSeen,
+      });
+    }
+  }
+
+  // Skip bytecode + balance polish when rate-limited — keep partial graph
+  if (!rateLimited) {
+    const unknownPeers = Array.from(nodes.values())
+      .filter(
+        (n) =>
+          n.id !== root &&
+          n.type === "eoa" &&
+          !isPrecompileAddress(n.id) &&
+          !KNOWN_CONTRACTS[n.id] &&
+          !PRECOMPILE_HINTS[n.id]
+      )
+      .sort(
+        (a, b) =>
+          (b.txCount || 0) - (a.txCount || 0) ||
+          (b.lastSeen || 0) - (a.lastSeen || 0)
+      )
+      .slice(0, PEER_CODE_ENRICH_CAP);
+
+    await mapPool(unknownPeers, 2, async (n) => {
+      if (rateLimited) return;
+      try {
+        const peerCode = await safeGetBytecode(client, n.id as Address);
+        if (peerCode && peerCode !== "0x" && peerCode !== "0x01") {
+          ensureNode(nodes, n.id, {
+            type: "contract",
+            label: n.label || "Contract",
+            live: true,
+            txCount: n.txCount,
+            lastSeen: n.lastSeen,
+          });
+        }
+      } catch {
+        /* keep eoa on failure */
+      }
+    });
+
+    // Optional balances for top peers only (UI polish)
+    const balancePeers = Array.from(nodes.values())
+      .filter((n) => n.id !== root)
+      .sort((a, b) => (b.txCount || 0) - (a.txCount || 0))
+      .slice(0, PEER_BALANCE_CAP);
+
+    await mapPool(balancePeers, 2, async (n) => {
+      if (rateLimited) return;
+      const bal = await safeGetBalance(client, n.id as Address);
+      if (bal == null) return;
+      ensureNode(nodes, n.id, {
+        type: n.type,
+        balance: bal.toString(),
+        label: n.label,
         live: true,
         txCount: n.txCount,
         lastSeen: n.lastSeen,
         agentStatus: n.agentStatus,
       });
-    } catch {
-      /* skip */
-    }
-  });
+    });
+  }
 
   ensureNode(nodes, root, {
     type: rootType,
@@ -1032,6 +1165,11 @@ export async function buildLiveGraph(
   const nonceNum = Number(nonce);
 
   const noteParts: string[] = [];
+  if (rateLimited) {
+    noteParts.push(
+      "RPC rate-limited (429) mid-scan — showing partial graph; retry in a few seconds or toggle Full tx off."
+    );
+  }
   if (realTxHits > 0) {
     noteParts.push(
       `Found ${realTxHits} recent tx(s) in last ${blocksScanned} blocks.`

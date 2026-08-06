@@ -87,6 +87,7 @@ const defaultFilters = (): Filters => ({
     "contract",
     "sovereign_agent",
     "persistent_agent",
+    "precompile",
   ]),
   edgeTypes: new Set<EdgeType>([
     "transfer",
@@ -95,7 +96,8 @@ const defaultFilters = (): Filters => ({
     "scheduled",
     "heartbeat",
   ]),
-  showPrecompiles: false,
+  // Core Lab / agent wallets mostly talk to precompiles — hide by default looked "EOA only"
+  showPrecompiles: true,
   minValueEth: 0,
   depth: 2,
 });
@@ -112,7 +114,8 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   timelineT: 1,
   blockHeight: null,
   lastRefreshAt: null,
-  autoRefresh: true,
+  // Off by default — auto-refresh every 28s was a major 429 source
+  autoRefresh: false,
   fullHistory: false,
   embedMode: false,
   rootLive: null,
@@ -220,12 +223,31 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
         signal: ac.signal,
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "fetch failed");
+      if (!res.ok) {
+        const errMsg = String(data.error || `fetch failed (${res.status})`);
+        // Surface 429 clearly for keep-previous logic
+        if (res.status === 429 || /429|too many requests/i.test(errMsg)) {
+          throw new Error(
+            errMsg.includes("429")
+              ? errMsg
+              : `429 Too Many Requests — ${errMsg}`
+          );
+        }
+        throw new Error(errMsg);
+      }
       const graph = data.graph as GraphData;
+      const softWarn =
+        data.stale || data.cached
+          ? data.stale
+            ? "Showing cached graph (RPC was busy)."
+            : null
+          : graph?.note && /rate-limited|429/i.test(graph.note)
+            ? "Partial scan — RPC rate limited mid-request."
+            : null;
       set({
         graph,
         loading: false,
-        error: null,
+        error: softWarn,
         selectedId: get().selectedId || addr,
         timelineT: 1,
         blockHeight: graph.blockHeight ?? data.blockHeight ?? null,
@@ -250,21 +272,56 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       });
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") return;
-      if (opts?.silent && get().graph?.source !== "mock") {
+      const msg = e instanceof Error ? e.message : "Live graph unavailable";
+      const is429 =
+        msg.includes("429") || /too many requests|rate limit/i.test(msg);
+      const prev = get().graph;
+      // Never wipe a good live graph on 429 / transient RPC errors
+      if (
+        prev &&
+        prev.root === addr &&
+        (prev.source === "live" || prev.source === "live_partial") &&
+        (prev.edges?.length > 0 || (prev.nodes?.length ?? 0) > 1)
+      ) {
         set({
-          error:
-            (e instanceof Error ? e.message : "Refresh failed") +
-            " — keeping previous graph",
+          loading: false,
+          error: is429
+            ? "RPC rate limited (429) — kept previous graph. Wait ~20s and Scan again."
+            : `${msg} — keeping previous graph`,
         });
         return;
       }
-      const graph = buildMockGraph(addr);
+      if (opts?.silent && prev && prev.source !== "mock") {
+        set({
+          loading: false,
+          error: is429
+            ? "RPC rate limited — kept previous graph"
+            : `${msg} — keeping previous graph`,
+        });
+        return;
+      }
+      // First load failed hard — show empty root shell, not misleading demo peers
       set({
-        graph,
+        graph: {
+          root: addr,
+          nodes: [
+            {
+              id: addr,
+              type: "eoa",
+              label: "EOA",
+              txCount: 0,
+              live: false,
+            },
+          ],
+          edges: [],
+          fetchedAt: new Date().toISOString(),
+          source: "live_partial",
+          note: is429
+            ? "RPC rate limited (429). Wait 20–30s, keep Full tx OFF, then Scan again."
+            : `Scan failed: ${msg}`,
+        },
         loading: false,
-        error:
-          (e instanceof Error ? e.message : "Live graph unavailable") +
-          " — showing demo neighborhood",
+        error: is429 ? "RPC rate limited — retry in ~20s (Full tx OFF)" : msg,
         selectedId: addr,
         blockHeight: null,
         lastRefreshAt: Date.now(),
