@@ -19,23 +19,29 @@ import {
   APP_CONTRACT_PROBES,
   KNOWN_CONTRACTS,
 } from "@/lib/knownContracts";
-import { PRECOMPILE_HINTS, RPC_URL } from "@/lib/ritual";
+import {
+  isPrecompileAddress,
+  PRECOMPILE_HINTS,
+  RPC_URL,
+} from "@/lib/ritual";
 
 const HEARTBEAT = "0xef505e801f1db392b5289690e2ffc20e840a3aca";
 const AGENTS_CACHE =
   "https://explorer.ritualfoundation.org/api/agents/cache";
 
-/** Light scan (default). Ritual ~0.35s/block → 200 blocks ≈ 70s of chain time. */
-const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 200);
+/** Light scan (default). Ritual ~0.35s/block → 600 blocks ≈ 3.5 min of chain time. */
+const BLOCK_SCAN_LIGHT = Number(process.env.RADAR_BLOCK_SCAN || 600);
 /**
  * Full tx history (opt-in on Radar site only).
  * Still a recent window — not lifetime (RPC prunes old getBlock history).
  */
-const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 1500);
+const BLOCK_SCAN_FULL = Number(process.env.RADAR_BLOCK_SCAN_FULL || 2500);
 const SCAN_CONCURRENCY = 16;
 /** Cap graph edges for WebGL performance */
-const MAX_TX_EDGES = 150;
-const MAX_INTERACTIONS_LIST = 200;
+const MAX_TX_EDGES = 180;
+const MAX_INTERACTIONS_LIST = 220;
+/** Classify this many peers with getBytecode (was 14 — caused "EOA-only" graphs) */
+const PEER_CODE_ENRICH_CAP = 80;
 
 const ROLE_VIEW_ABI = [
   {
@@ -461,15 +467,32 @@ async function mapPool<T, R>(
 }
 
 function classifyTx(
-  from: string,
+  _from: string,
   to: string | null,
   value: bigint
 ): GraphEdge["type"] {
-  if (to && PRECOMPILE_HINTS[to]) return "async";
+  if (!to) return "call";
   if (to === HEARTBEAT) return "heartbeat";
   if (to === "0x56e776bae2dd60664b69bd5f865f1180ffb7d58b") return "scheduled";
+  // Native precompile range → async (HTTP/LLM/crypto precompiles, agents, …)
+  if (isPrecompileAddress(to)) return "async";
   if (value > BigInt(0)) return "transfer";
   return "call";
+}
+
+/**
+ * Initial peer type before bytecode (known labels + precompile range).
+ * Unknowns start as eoa and are upgraded via getBytecode enrichment.
+ */
+function classifyPeerQuick(
+  peer: string,
+  opts: { created?: boolean }
+): NodeType {
+  if (isPrecompileAddress(peer)) return "precompile";
+  // System / app contracts in catalogs
+  if (KNOWN_CONTRACTS[peer] || PRECOMPILE_HINTS[peer]) return "contract";
+  if (opts.created) return "contract";
+  return "eoa";
 }
 
 export async function buildLiveGraph(
@@ -736,8 +759,8 @@ export async function buildLiveGraph(
   let blocksScanned = 0;
   // Light was wrongly capped at 96 — too short for Ritual's ~0.35s blocks
   const scanCap = fullHistory
-    ? Math.max(120, Math.min(BLOCK_SCAN_FULL, 2500))
-    : Math.max(48, Math.min(BLOCK_SCAN_LIGHT, 400));
+    ? Math.max(200, Math.min(BLOCK_SCAN_FULL, 3000))
+    : Math.max(120, Math.min(BLOCK_SCAN_LIGHT, 900));
   const blockIndexes = Array.from(
     { length: scanCap },
     (_, i) => blockHeight - i
@@ -805,6 +828,7 @@ export async function buildLiveGraph(
 
           // Contract create: to is null — resolve contractAddress from receipt
           let peer = to;
+          let created = false;
           if (!peer && from === root) {
             try {
               const receipt = await client.getTransactionReceipt({
@@ -812,6 +836,7 @@ export async function buildLiveGraph(
               });
               if (receipt.contractAddress) {
                 peer = nodeId(receipt.contractAddress);
+                created = true;
               }
             } catch {
               /* receipt unavailable */
@@ -819,10 +844,7 @@ export async function buildLiveGraph(
           }
           if (!peer) continue;
 
-          let peerType: NodeType = "eoa";
-          if (PRECOMPILE_HINTS[peer]) peerType = "precompile";
-          else if (KNOWN_CONTRACTS[peer]) peerType = "contract";
-          else if (!to) peerType = "contract"; // freshly created
+          let peerType = classifyPeerQuick(peer, { created: created || !to });
           if (
             persistent.some(
               (p) =>
@@ -836,9 +858,19 @@ export async function buildLiveGraph(
             peerType = "sovereign_agent";
           }
 
+          // Accumulate hit count on peer for prioritising bytecode checks
           ensureNode(nodes, peer, {
             type: peerType,
-            label: labelFor(peer, !to ? "Deployed contract" : undefined),
+            label: labelFor(
+              peer,
+              created || !to
+                ? "Deployed contract"
+                : peerType === "precompile"
+                  ? PRECOMPILE_HINTS[peer]
+                  : peerType === "contract"
+                    ? KNOWN_CONTRACTS[peer] || "Contract"
+                    : undefined
+            ),
             live: true,
             lastSeen: bn,
             txCount: 1,
@@ -863,8 +895,14 @@ export async function buildLiveGraph(
         }
       }
 
-      // Early stop light mode once we have enough sample edges
-      if (!fullHistory && realTxHits >= 24) break;
+      // Early stop light mode only after enough hits AND we already have
+      // some non-EOA peers (or hit cap) — avoids stopping on pure EOA spam.
+      if (!fullHistory && realTxHits >= 40) {
+        const hasNonEoa = Array.from(nodes.values()).some(
+          (n) => n.id !== root && n.type !== "eoa"
+        );
+        if (hasNonEoa || realTxHits >= 80) break;
+      }
     }
   } catch {
     /* scan best-effort */
@@ -897,25 +935,73 @@ export async function buildLiveGraph(
   edges.length = 0;
   edges.push(...trimmedReal, ...otherEdges);
 
-  // Enrich peer balances for top peers (cap RPC load)
-  const peers = Array.from(nodes.keys())
-    .filter((id) => id !== root)
-    .slice(0, 14);
-  await mapPool(peers, 6, async (id) => {
+  // Classify peers with getBytecode — prioritize high-degree / recent peers.
+  // BUGFIX: previously only first 14 Map keys were checked, so most contracts
+  // stayed typed as "eoa" (user saw "only EOAs" for busy wallets).
+  const peersRanked = Array.from(nodes.values())
+    .filter((n) => n.id !== root)
+    .sort((a, b) => {
+      // Prefer unknowns that look like they need classification
+      const aNeed = a.type === "eoa" ? 1 : 0;
+      const bNeed = b.type === "eoa" ? 1 : 0;
+      if (aNeed !== bNeed) return bNeed - aNeed;
+      return (b.txCount || 0) - (a.txCount || 0) || (b.lastSeen || 0) - (a.lastSeen || 0);
+    })
+    .slice(0, PEER_CODE_ENRICH_CAP)
+    .map((n) => n.id);
+
+  await mapPool(peersRanked, 10, async (id) => {
     try {
-      const [bal, c] = await Promise.all([
+      const n = nodes.get(id);
+      if (!n) return;
+
+      // Preserve agent types; force precompile range
+      if (n.type === "persistent_agent" || n.type === "sovereign_agent") {
+        const bal = await client.getBalance({ address: id as Address });
+        ensureNode(nodes, id, {
+          type: n.type,
+          balance: bal.toString(),
+          label: n.label,
+          live: true,
+          txCount: n.txCount,
+          lastSeen: n.lastSeen,
+          agentStatus: n.agentStatus,
+        });
+        return;
+      }
+
+      if (isPrecompileAddress(id)) {
+        const bal = await client.getBalance({ address: id as Address });
+        ensureNode(nodes, id, {
+          type: "precompile",
+          balance: bal.toString(),
+          label: PRECOMPILE_HINTS[id] || labelFor(id, "Precompile"),
+          live: true,
+          txCount: n.txCount,
+          lastSeen: n.lastSeen,
+        });
+        return;
+      }
+
+      const [bal, code] = await Promise.all([
         client.getBalance({ address: id as Address }),
         client.getBytecode({ address: id as Address }),
       ]);
-      const n = nodes.get(id)!;
-      const isCode = Boolean(c && c !== "0x");
-      let type = n.type;
-      if (type === "eoa" && isCode) type = "contract";
-      if (PRECOMPILE_HINTS[id]) type = "precompile";
+      const isCode = Boolean(code && code !== "0x");
+      let type: NodeType = "eoa";
+      if (KNOWN_CONTRACTS[id] || PRECOMPILE_HINTS[id] || isCode) {
+        type = "contract";
+      }
+
       ensureNode(nodes, id, {
         type,
         balance: bal.toString(),
-        label: n.label || labelFor(id),
+        label:
+          n.label ||
+          labelFor(
+            id,
+            type === "contract" ? "Contract" : "EOA"
+          ),
         live: true,
         txCount: n.txCount,
         lastSeen: n.lastSeen,
@@ -963,9 +1049,20 @@ export async function buildLiveGraph(
       `${roleLinks} code-verified role link(s) via owner()/treasury()/admin() on known app contracts.`
     );
   }
+  const nonEoaPeers = Array.from(nodes.values()).filter(
+    (n) => n.id !== root && n.type !== "eoa"
+  ).length;
+  const eoaPeers = Array.from(nodes.values()).filter(
+    (n) => n.id !== root && n.type === "eoa"
+  ).length;
+  if (nonEoaPeers > 0 || eoaPeers > 0) {
+    noteParts.push(
+      `Peers: ${nonEoaPeers} contract/precompile/agent · ${eoaPeers} EOA (bytecode-checked).`
+    );
+  }
   if (nonceNum > 0 && realTxHits === 0) {
     noteParts.push(
-      `Nonce is ${nonceNum} (historical activity exists); Ritual RPC cannot serve lifetime tx history — role links recover live ownership.`
+      `Nonce is ${nonceNum} (historical activity exists); Ritual RPC cannot serve lifetime tx history — enable Full tx for a deeper recent window, role links recover live ownership.`
     );
   }
   if (!hasAnyLiveEdge) {
@@ -973,7 +1070,9 @@ export async function buildLiveGraph(
       "Empty neighborhood for this window (no fake hubs). Full tx digs more recent blocks; lifetime needs indexer/paid dig."
     );
   } else if (!fullHistory) {
-    noteParts.push("Enable Full tx on the Radar site for a deeper recent-block scan.");
+    noteParts.push(
+      "Enable Full tx on the Radar site for a deeper recent-block scan (contracts + precompiles included)."
+    );
   }
   noteParts.push(
     "Heartbeat edges only for persistent agents to AgentHeartbeat, never bare EOAs."
